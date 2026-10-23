@@ -251,6 +251,19 @@ jobs:
             CODE_SIGNING_ALLOWED=NO 2>&1 | tee build27.log | grep -E "error:|warning: .*AsBuilt/|BUILD (SUCCEEDED|FAILED)|TEST BUILD (SUCCEEDED|FAILED)" || true
           grep -qE "(TEST )?BUILD SUCCEEDED" build27.log
 
+      - name: App tests on iOS 27 simulator
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project AsBuilt.xcodeproj -scheme AsBuilt \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath "$DERIVED" \
+            -resultBundlePath build/AppTests27.xcresult \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee app-tests27.log | grep -E "error:|Test Case|Executed|TEST (EXECUTE )?(SUCCEEDED|FAILED)|Exception|crash" || true
+          grep -qE "TEST (EXECUTE )?SUCCEEDED" app-tests27.log
+
       - name: Launch smoke test (fresh install, no launch args, then 3D model screen)
         id: smoke
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -268,19 +281,6 @@ jobs:
           usdchecker --arkit "$f" 2>&1 | grep -v "RegisterBehaviorForPrimTypeId" | tee usdchecker-ios27.txt
           grep -q "^Success!" usdchecker-ios27.txt
           usdtree "$f" | head -40
-
-      - name: App tests on iOS 27 simulator
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: |
-          set -o pipefail
-          xcodebuild test-without-building \
-            -project AsBuilt.xcodeproj -scheme AsBuilt \
-            -sdk iphonesimulator \
-            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
-            -derivedDataPath "$DERIVED" \
-            -resultBundlePath build/AppTests27.xcresult \
-            CODE_SIGNING_ALLOWED=NO 2>&1 | tee app-tests27.log | grep -E "error:|Test Case|Executed|TEST (EXECUTE )?(SUCCEEDED|FAILED)|Exception|crash" || true
-          grep -qE "TEST (EXECUTE )?SUCCEEDED" app-tests27.log
 
       - name: Collect simulator crash reports
         if: always()
