@@ -671,3 +671,19 @@ struct LabelPlacementTests {
         #expect(pairs.filter { $0.code == 0 && $0.value == "POLYLINE" }.count == 6)
     }
 }
+
+@Suite("Fixture label fit")
+struct FixtureLabelFitTests {
+    @Test func narrowDishwasherUsesAbbreviation() {
+        let drawing = PlanGeometryBuilder.build(SampleData.kitchen(), units: .imperial)
+        let labels = drawing.texts.filter { $0.role == .fixtureLabel }.map(\.text)
+        #expect(labels.contains("DW"))
+        #expect(!labels.contains("DISHWASHER"))
+        #expect(labels.contains("SINK"))
+    }
+
+    @Test func abbreviationTable() {
+        #expect(PlanDrawing.abbreviation(for: "Refrigerator") == "REF")
+        #expect(PlanDrawing.abbreviation(for: "unknown thing") == nil)
+    }
+}

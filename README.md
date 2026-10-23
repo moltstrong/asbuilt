@@ -4,9 +4,13 @@ An iOS app for construction crews. Point an iPhone's LiDAR camera at a room or a
 office can use: a CAD floor plan (DXF), a 3D model (USDZ), a printable plan with a quantity takeoff (PDF)
 and a spreadsheet takeoff (CSV).
 
-| Job list | Floor plan | Takeoff |
-| --- | --- | --- |
-| ![](screenshots/01-job-list.png) | ![](screenshots/03-plan-bedroom.png) | ![](screenshots/04-takeoff.png) |
+| Job list | Demo job | Floor plan | Takeoff |
+| --- | --- | --- | --- |
+| ![](screenshots/01-job-list.png) | ![](screenshots/02-demo-job.png) | ![](screenshots/03-plan-bedroom.png) | ![](screenshots/04-takeoff.png) |
+| **Per-wall takeoff** | **Kitchen plan** | **3D / AR Quick Look** | **Share / export** |
+| ![](screenshots/05-takeoff-walls.png) | ![](screenshots/06-plan-kitchen.png) | ![](screenshots/07-3d-model.png) | ![](screenshots/08-files-export.png) |
+
+Screenshots come from the iOS Simulator in CI (`scripts/capture-screenshots.sh`) using the built-in Demo job.
 
 ## What it does
 

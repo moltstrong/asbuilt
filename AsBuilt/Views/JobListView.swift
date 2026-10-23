@@ -110,21 +110,23 @@ struct JobRow: View {
                 .frame(width: 48, height: 48)
                 .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 12))
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(job.name).font(.headline).lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(job.name).font(.headline).lineLimit(2)
                     if job.isDemo { Badge(text: "DEMO") }
                 }
                 if !job.address.isEmpty {
                     Label(job.address, systemImage: "mappin.and.ellipse")
                         .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }
-                HStack(spacing: 12) {
-                    Label("\(job.roomCaptures.count) rooms", systemImage: "square.split.bottomrightquarter")
-                    Label("\(job.objectCaptures.count) objects", systemImage: "cube")
-                    if !job.client.isEmpty { Label(job.client, systemImage: "person").lineLimit(1) }
+                if !job.client.isEmpty {
+                    Label(job.client, systemImage: "person")
+                        .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
+                Label(Self.countsText(rooms: job.roomCaptures.count, objects: job.objectCaptures.count),
+                      systemImage: "square.split.bottomrightquarter")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Spacer(minLength: 0)
             Image(systemName: "chevron.right").font(.body.weight(.semibold)).foregroundStyle(.tertiary)
@@ -132,6 +134,10 @@ struct JobRow: View {
         .frame(minHeight: 72)
         .card()
         .contentShape(Rectangle())
+    }
+
+    static func countsText(rooms: Int, objects: Int) -> String {
+        "\(rooms) \(rooms == 1 ? "room" : "rooms") · \(objects) \(objects == 1 ? "object" : "objects")"
     }
 }
 

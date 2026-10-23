@@ -275,10 +275,16 @@ public enum PlanGeometryBuilder {
             let corners = fixture.corners
             drawing.lines.append(PlanLine(a: corners[0], b: corners[2], layer: .fixtures))
             // Run the label along the box's long side and shrink it to fit.
-            let label = fixture.label.uppercased()
             let alongWidth = fixture.width >= fixture.depth
             let span = alongWidth ? fixture.width : fixture.depth
-            let fit = span * 0.85 / max(1, Double(label.count) * 0.82)
+            func fitHeight(_ text: String) -> Double { span * 0.85 / max(1, Double(text.count) * 0.82) }
+            var label = fixture.label.uppercased()
+            var fit = fitHeight(label)
+            // Too long for its box: fall back to the standard CAD abbreviation (DW, REF, W/D...).
+            if fit < style.fixtureTextHeight * 0.7, let short = PlanDrawing.abbreviation(for: label) {
+                label = short
+                fit = fitHeight(label)
+            }
             let angle = fixture.rotation * 180 / .pi + (alongWidth ? 0 : 90)
             drawing.texts.append(PlanText(text: label, position: fixture.center,
                                           height: max(0.05, min(style.fixtureTextHeight, fit)),
@@ -464,5 +470,20 @@ public enum PlanGeometryBuilder {
         let denom = d.cross(e)
         guard abs(denom) > 0.05 else { return nil }
         return (q - p).cross(e) / denom
+    }
+}
+
+
+extension PlanDrawing {
+    /// Common drafting abbreviations for fixture labels that do not fit inside their box.
+    public static func abbreviation(for label: String) -> String? {
+        let table: [String: String] = [
+            "DISHWASHER": "DW", "REFRIGERATOR": "REF", "WASHER": "W", "DRYER": "D",
+            "WASHER/DRYER": "W/D", "CABINETS": "CAB", "CABINET": "CAB", "FIREPLACE": "FP",
+            "BATHTUB": "TUB", "TELEVISION": "TV", "TOILET": "WC", "OVEN": "OV",
+            "STAIRS": "UP", "STOVE": "RANGE", "TABLE": "TBL", "STORAGE": "STOR",
+            "DRESSER": "DRS", "CHAIR": "CH", "SOFA": "SOFA", "BED": "BED", "SINK": "SK",
+        ]
+        return table[label.uppercased()]
     }
 }
