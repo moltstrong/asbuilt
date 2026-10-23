@@ -24,7 +24,10 @@ struct ModelTabView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let url {
-                    SceneModelView(url: url, revision: store.exportsRevision)
+                    SceneModelView(url: url, revision: store.exportsRevision,
+                                   vertexColorsPLY: capture.isDetailScan
+                                       ? store.captureDirectory(job: jobID, capture: capture.id).appendingPathComponent(CaptureFile.meshPLY)
+                                       : nil)
                         .frame(height: 380)
                         .clipShape(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous).stroke(Theme.hairline, lineWidth: 0.5))
@@ -209,6 +212,9 @@ struct SceneModelView: UIViewRepresentable {
     let url: URL
     /// Bumped when files are regenerated; the scene reloads when it changes.
     var revision: Int = 0
+    /// Detail scans: binary PLY whose per-vertex colors are applied in the viewer (SceneKit ignores
+    /// the USDZ's displayColor primvar reader).
+    var vertexColorsPLY: URL? = nil
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView()
@@ -237,6 +243,7 @@ struct SceneModelView: UIViewRepresentable {
     private func load(into view: SCNView) {
         guard let scene = try? SCNScene(url: url, options: [.checkConsistency: false]) else { return }
         view.scene = scene
+        if let vertexColorsPLY { VertexColorPatch.applyAsync(to: scene, ply: vertexColorsPLY) }
         let (minV, maxV) = scene.rootNode.boundingBox
         let center = SCNVector3((minV.x + maxV.x) / 2, (minV.y + maxV.y) / 2, (minV.z + maxV.z) / 2)
         let size = max(maxV.x - minV.x, max(maxV.y - minV.y, maxV.z - minV.z))
@@ -245,8 +252,15 @@ struct SceneModelView: UIViewRepresentable {
         camera.zFar = Double(size) * 20 + 100
         let cameraNode = SCNNode()
         cameraNode.camera = camera
-        let distance = Float(size) * 1.25 + 0.5
-        cameraNode.position = SCNVector3(center.x + distance * 0.55, center.y + distance * 0.95, center.z + distance * 0.75)
+        if vertexColorsPLY != nil {
+            // Detail scans are small (tens of cm) and mostly face +Z: frame them from the front.
+            camera.zNear = 0.005
+            let distance = Float(size) * 1.55
+            cameraNode.position = SCNVector3(center.x + distance * 0.25, center.y + distance * 0.18, center.z + distance)
+        } else {
+            let distance = Float(size) * 1.25 + 0.5
+            cameraNode.position = SCNVector3(center.x + distance * 0.55, center.y + distance * 0.95, center.z + distance * 0.75)
+        }
         cameraNode.look(at: center)
         scene.rootNode.addChildNode(cameraNode)
         view.pointOfView = cameraNode

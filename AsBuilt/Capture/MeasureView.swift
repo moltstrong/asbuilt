@@ -148,9 +148,9 @@ struct MeasurementRow: View {
                 .frame(width: 44, height: 44)
                 .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 10))
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(m.label).font(.headline).lineLimit(1)
-                    if m.tapeMeters != nil { Badge(text: "TAPE", color: Theme.ok) }
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(m.label).font(.headline).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                    if m.tapeMeters != nil { Badge(text: "TAPE", color: Theme.ok).fixedSize() }
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(UnitFormatter.precise(value, units)).font(.title3.weight(.bold).monospacedDigit())

@@ -371,6 +371,11 @@ final class AsBuiltAppTests: XCTestCase {
         var geometryNodes = 0
         scene.rootNode.enumerateHierarchy { node, _ in if node.geometry != nil { geometryNodes += 1 } }
         XCTAssertGreaterThanOrEqual(geometryNodes, 1)
+        // The 3D tab re-applies the vertex colors SceneKit drops from the USDZ.
+        XCTAssertEqual(VertexColorPatch.apply(to: scene, ply: dir.appendingPathComponent(CaptureFile.meshPLY)), geometryNodes)
+        var colorSources = 0
+        scene.rootNode.enumerateHierarchy { node, _ in colorSources += node.geometry?.sources(for: .color).count ?? 0 }
+        XCTAssertEqual(colorSources, geometryNodes)
         XCTAssertEqual(Router.initialPath(for: "detail").count, 2)
         XCTAssertEqual(Router.initialPath(for: "measurements").count, 2)
         XCTAssertEqual(Router.initialPath(for: "coach-grade").count, 1)

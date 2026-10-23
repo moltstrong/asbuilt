@@ -35,6 +35,7 @@
 		C0C78CF4C72688B457E3E56A /* JobListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11D54B6B89E71C3C6C3BCA7 /* JobListView.swift */; };
 		C353C6C4554C26AE79E1F448 /* RoomScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2CA3B599C8DA730DED1551B /* RoomScanView.swift */; };
 		C3B3F117DAEC151B1EEF9EA3 /* ObjectReconstructor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FD7A3C01E78ACC107AEF10 /* ObjectReconstructor.swift */; };
+		D723CC79F9C126B365F2396A /* VertexColorPatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83BA784030603723DDBA98F5 /* VertexColorPatch.swift */; };
 		DB3A0FFA4D9583812AF20334 /* CapabilitiesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51554FA7BA8734A06E959BE9 /* CapabilitiesView.swift */; };
 		F8ED33BC2505899E9028483E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 4D887AE973AD69FBECD01551 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
@@ -67,6 +68,7 @@
 		6BBF8D252112C7CA095856BD /* ObjectCaptureFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectCaptureFlowView.swift; sourceTree = "<group>"; };
 		6FDAFA9487824FCC6E9867CC /* AsBuiltCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = AsBuiltCore; path = AsBuiltCore; sourceTree = SOURCE_ROOT; };
 		835469C75EDDCABC4860131F /* AsBuilt.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AsBuilt.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		83BA784030603723DDBA98F5 /* VertexColorPatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VertexColorPatch.swift; sourceTree = "<group>"; };
 		863DC04AB313B57E5ABBEEFB /* CoachHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachHUD.swift; sourceTree = "<group>"; };
 		8CF05DD0EFCE2C332F818EBD /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		9A67D82C09F45EA6B717501C /* MeasureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasureView.swift; sourceTree = "<group>"; };
@@ -143,6 +145,7 @@
 				F11D54B6B89E71C3C6C3BCA7 /* JobListView.swift */,
 				55CE9CFC2C82DB014A1E62BE /* ModelAndFilesViews.swift */,
 				5B11F3E102AD06A8CCF13A72 /* TakeoffView.swift */,
+				83BA784030603723DDBA98F5 /* VertexColorPatch.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -350,6 +353,7 @@
 				837D5BAF63662FB99B6830ED /* Router.swift in Sources */,
 				5241B655B4BFA83CD04A4BAB /* TakeoffView.swift in Sources */,
 				86568911BECDC906613EABD6 /* Theme.swift in Sources */,
+				D723CC79F9C126B365F2396A /* VertexColorPatch.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
