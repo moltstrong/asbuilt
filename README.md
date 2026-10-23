@@ -136,6 +136,19 @@ To regenerate the project after adding files: `brew install xcodegen && xcodegen
 - **PDF (`floorplan.pdf`):** page 1 is the plan sheet with a title block, page 2 is the takeoff, ready to print or attach to a bid.
 - **JSON:** `room.json` is Apple's `CapturedRoom` (Codable). `plan.json` is AsBuilt's own plan model, in meters.
 
+## Full-detail models on a Mac (`MacRecon/`)
+
+iPhones can only build Object Capture models at `.reduced` detail. `MacRecon/` is a standalone macOS command-line
+tool, `asbuilt-recon`, that rebuilds a capture's exported photos at `full`, `raw` or `custom` (8K textures) detail
+with `PhotogrammetrySession`. It outputs USDZ + OBJ, a log, and plain-language errors. `asbuilt-recon serve` is the
+Mac side of a "Build full detail" button: the phone uploads the photos, and the Mac builds and returns the model.
+See [MacRecon/README.md](MacRecon/README.md) for the tool and [MacRecon/API.md](MacRecon/API.md) for the phone ↔ Mac contract.
+
+```bash
+cd MacRecon && swift build -c release
+.build/release/asbuilt-recon build ~/Downloads/Pump-3-photos.zip --detail full --obj
+```
+
 ## Project layout
 
 ```
