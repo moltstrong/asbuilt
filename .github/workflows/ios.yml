@@ -36,8 +36,10 @@ jobs:
         env:
           ASBUILT_EXPORT_DIR: ${{ github.workspace }}/artifacts/core-exports
         run: |
+          set -o pipefail
           swift test 2>&1 | tee ../core-tests.log
-          grep -E "Test run with [0-9]+ tests? passed" ../core-tests.log
+          # Swift Testing summary, e.g. "Test run with 53 tests in 12 suites passed after 0.02 seconds."
+          grep -E "Test run with [0-9]+ tests? (in [0-9]+ suites? )?passed" ../core-tests.log
 
       - name: Install XcodeGen and generate project
         run: |
