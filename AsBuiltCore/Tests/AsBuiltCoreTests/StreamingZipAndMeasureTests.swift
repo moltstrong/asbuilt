@@ -85,7 +85,8 @@ struct StreamingZipTests {
         let expected = try makeImages(in: dir)
         let out = dir.appendingPathComponent("photos64.zip")
         let zip = try StreamingZipWriter(url: out, chunkSize: 64 * 1024, zip64Threshold: 0)
-        try zip.addDirectory(dir.appendingPathComponent("Images"), prefix: "Images/")
+        // Prefix without the trailing slash (what the app passes) must still make a folder.
+        try zip.addDirectory(dir.appendingPathComponent("Images"), prefix: "Images")
         try zip.finish()
         let (status, text) = try run("/usr/bin/unzip", ["-t", out.path])
         #expect(status == 0, "\(text)")

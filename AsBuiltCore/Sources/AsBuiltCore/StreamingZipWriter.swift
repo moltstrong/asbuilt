@@ -101,8 +101,10 @@ public final class StreamingZipWriter {
         let files = Self.regularFiles(in: directory)
         let total = files.reduce(UInt64(0)) { $0 + $1.size }
         var done: UInt64 = 0
+        // "Images" and "Images/" both mean the folder Images (no "ImagesIMG_1.HEIC" entries).
+        let folder = prefix.isEmpty || prefix.hasSuffix("/") ? prefix : prefix + "/"
         for file in files {
-            try addFile(at: file.url, path: prefix + file.relativePath)
+            try addFile(at: file.url, path: folder + file.relativePath)
             done += file.size
             progress?(done, total)
         }
