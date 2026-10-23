@@ -40,23 +40,51 @@ jobs:
       - name: Create iOS 27 simulator (iPhone 18 Pro preferred)
         id: sim
         run: |
-          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c '
-          import json, sys
-          rs = [r for r in json.load(sys.stdin)["runtimes"] if r["platform"] == "iOS" and r["isAvailable"]]
-          rs.sort(key=lambda r: [int(x) for x in r["version"].split(".")])
-          ios27 = [r for r in rs if r["version"].split(".")[0] == "27"]
+          # Candidate (runtime, device type) pairs: newest iOS 27 runtime first, iPhone 18 Pro first,
+          # only device types the runtime says it supports (simctl create fails with
+          # "Incompatible device" otherwise).
+          xcrun simctl list runtimes -j > runtimes.json
+          xcrun simctl list devicetypes -j > devicetypes.json
+          python3 - > sim-candidates.txt <<'PY'
+          import json
+          rts = [r for r in json.load(open("runtimes.json"))["runtimes"] if r["platform"] == "iOS" and r["isAvailable"]]
+          rts.sort(key=lambda r: [int(x) for x in r["version"].split(".")], reverse=True)
+          ios27 = [r for r in rts if r["version"].split(".")[0] == "27"]
           if not ios27:
-              sys.exit("no iOS 27 runtime on this image: " + ", ".join(r["version"] for r in rs))
-          print(ios27[-1]["identifier"])')
-          DEVICE_TYPE=$(xcrun simctl list devicetypes -j | python3 -c '
-          import json, sys
-          names = [d["identifier"] for d in json.load(sys.stdin)["devicetypes"]]
-          def pick(tag): return [n for n in names if tag in n and "Max" not in n and "Plus" not in n]
-          prefs = pick("iPhone-18-Pro") + pick("iPhone-17-Pro") + [n for n in names if "iPhone" in n]
-          print(prefs[0])')
-          echo "runtime=$RUNTIME device=$DEVICE_TYPE"
-          UDID=$(xcrun simctl create "$SIM_NAME" "$DEVICE_TYPE" "$RUNTIME")
-          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+              raise SystemExit("no iOS 27 runtime on this image: " + ", ".join(r["version"] for r in rts))
+          all_types = [d["identifier"] for d in json.load(open("devicetypes.json"))["devicetypes"]]
+          def rank(ident):
+              plain = "Max" not in ident and "Plus" not in ident
+              if "iPhone-18-Pro" in ident and plain: return 0
+              if "iPhone-18" in ident: return 1
+              if "iPhone-17-Pro" in ident and plain: return 2
+              if "iPhone" in ident: return 3
+              return None
+          pairs = []
+          for r in ios27:
+              supported = [d["identifier"] for d in r.get("supportedDeviceTypes", [])] or all_types
+              for d in sorted((d for d in supported if rank(d) is not None), key=rank):
+                  pairs.append((rank(d), r["identifier"], d))
+          pairs.sort(key=lambda p: p[0])  # best device first; runtimes stay newest-first within a rank
+          for _, r, d in pairs:
+              print(r, d)
+          PY
+          head -8 sim-candidates.txt
+          UDID=""
+          while read -r RUNTIME DEVICE_TYPE; do
+            if UDID=$(xcrun simctl create "$SIM_NAME" "$DEVICE_TYPE" "$RUNTIME" 2>sim-create.err); then
+              echo "created runtime=$RUNTIME device=$DEVICE_TYPE udid=$UDID"
+              break
+            fi
+            echo "skip $RUNTIME $DEVICE_TYPE: $(tr '\n' ' ' < sim-create.err)"
+            UDID=""
+          done < sim-candidates.txt
+          test -n "$UDID"
+          {
+            echo "udid=$UDID"
+            echo "runtime=$RUNTIME"
+            echo "device=$DEVICE_TYPE"
+          } >> "$GITHUB_OUTPUT"
           xcrun simctl list devices | grep "$SIM_NAME"
 
       - name: Build app + tests for iOS 27 simulator
