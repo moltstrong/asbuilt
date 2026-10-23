@@ -143,6 +143,9 @@ jobs:
             -authenticationKeyID "$ASC_KEY_ID" \
             -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             2>&1 | tee export.log
+          if grep -q "Cloud signing permission error" export.log; then
+            echo "::error title=API key role too low::Distribution cloud signing needs an App Store Connect API key with the Admin role (App Manager/Developer keys can't). Generate a new Admin team key and update ASC_KEY_ID + ASC_KEY_P8."
+          fi
           grep -q "EXPORT SUCCEEDED" export.log
           echo "### Uploaded AsBuilt 1.0 ($BUILD_NUMBER) to App Store Connect" >> "$GITHUB_STEP_SUMMARY"
           echo "Bundle ID \`$BUNDLE_ID\`. The build appears in TestFlight after Apple finishes processing (usually 5-30 min)." >> "$GITHUB_STEP_SUMMARY"
