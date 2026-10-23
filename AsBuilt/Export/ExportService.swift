@@ -26,6 +26,8 @@ enum ExportService {
             case .roomPlan: source = "LiDAR scan (Apple RoomPlan)"
             case .objectCapture: source = "Object Capture"
             case .sample: source = "Sample data"
+            case .lidarMesh: source = "LiDAR Mesh scan (ARKit)"
+            case .unknown: source = "AsBuilt"
             }
             self.init(jobName: job.name, address: job.address, client: job.client, roomTitle: capture.title,
                       date: capture.createdAt, source: source)
@@ -97,6 +99,18 @@ enum ExportService {
         let url = dir.appendingPathComponent(CaptureFile.modelUSDZ)
         try USDZPackager.roomModel(plan: plan).write(to: url, options: .atomic)
         return url
+    }
+
+    /// Demo LiDAR Mesh scan: model.usdz, mesh.obj/.mtl, mesh.ply, measurements.csv, scan-info.json.
+    /// Pure AsBuiltCore output, safe on any thread.
+    @discardableResult
+    static func writeDemoMeshScan(to dir: URL, title: String, units: UnitSystem) throws -> MeshMeasurements {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let output = LiDARMeshExporter.export(DemoMeshScan.bedroomMesh(), title: title, units: units)
+        for file in output.files {
+            try file.data.write(to: dir.appendingPathComponent(file.name), options: .atomic)
+        }
+        return output.measurements
     }
 
     /// Bundles files (recursing into folders) into one stored ZIP in the temporary directory.

@@ -18,6 +18,7 @@
 		6993E80AE59E279F99BD78F9 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8CF05DD0EFCE2C332F818EBD /* PrivacyInfo.xcprivacy */; };
 		78F7E59CC24925F72EFAC6C2 /* ObjectCaptureFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BBF8D252112C7CA095856BD /* ObjectCaptureFlowView.swift */; };
 		837D5BAF63662FB99B6830ED /* Router.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCF54DCEF0AE76E25D64D66 /* Router.swift */; };
+		85AC9866F3F6878C88BAA8E5 /* LiDARMeshScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FB6A8AA2F96746C3CD6BEE0 /* LiDARMeshScanView.swift */; };
 		86568911BECDC906613EABD6 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48B91AA828710384BA219AE4 /* Theme.swift */; };
 		8DD3622F1AB7A25944E1C2F8 /* CaptureDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBFEAB7DE9B3D3417AFAE70E /* CaptureDetailView.swift */; };
 		8FDB9AE9FC4DC4B9C1025118 /* PlanCGDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEA4678CB03C4E7B98804041 /* PlanCGDrawer.swift */; };
@@ -28,6 +29,7 @@
 		BC884DE51F3748441749A99E /* JobDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F477EEB208681925DD411B2 /* JobDetailView.swift */; };
 		C0C78CF4C72688B457E3E56A /* JobListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11D54B6B89E71C3C6C3BCA7 /* JobListView.swift */; };
 		C353C6C4554C26AE79E1F448 /* RoomScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2CA3B599C8DA730DED1551B /* RoomScanView.swift */; };
+		C3B3F117DAEC151B1EEF9EA3 /* ObjectReconstructor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FD7A3C01E78ACC107AEF10 /* ObjectReconstructor.swift */; };
 		DB3A0FFA4D9583812AF20334 /* CapabilitiesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51554FA7BA8734A06E959BE9 /* CapabilitiesView.swift */; };
 		F8ED33BC2505899E9028483E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 4D887AE973AD69FBECD01551 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
@@ -44,6 +46,7 @@
 
 /* Begin PBXFileReference section */
 		1B203540A0BFC851F5AFC2FF /* PDFPlanRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFPlanRenderer.swift; sourceTree = "<group>"; };
+		1FB6A8AA2F96746C3CD6BEE0 /* LiDARMeshScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiDARMeshScanView.swift; sourceTree = "<group>"; };
 		25DC1E0A24E1A488207F210A /* Job.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Job.swift; sourceTree = "<group>"; };
 		36634BBF4BF9036D23B8D57F /* RoomPlanAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomPlanAdapter.swift; sourceTree = "<group>"; };
 		392F2A25096FF32008CA869E /* CaptureLaunchers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureLaunchers.swift; sourceTree = "<group>"; };
@@ -61,6 +64,7 @@
 		9B4A03AEDF66E27F7BADFD36 /* JobStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobStore.swift; sourceTree = "<group>"; };
 		9F477EEB208681925DD411B2 /* JobDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobDetailView.swift; sourceTree = "<group>"; };
 		A54E409DE45928CA7BA1C3C2 /* AsBuiltTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AsBuiltTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C0FD7A3C01E78ACC107AEF10 /* ObjectReconstructor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectReconstructor.swift; sourceTree = "<group>"; };
 		C53DBCAA42BE5CBF44DF32E0 /* AsBuiltApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsBuiltApp.swift; sourceTree = "<group>"; };
 		CABD7E51DB071EB42D15C5B7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		DE773C26A7825C401A2C7EBC /* DeviceCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCapabilities.swift; sourceTree = "<group>"; };
@@ -137,7 +141,9 @@
 			children = (
 				392F2A25096FF32008CA869E /* CaptureLaunchers.swift */,
 				DE773C26A7825C401A2C7EBC /* DeviceCapabilities.swift */,
+				1FB6A8AA2F96746C3CD6BEE0 /* LiDARMeshScanView.swift */,
 				6BBF8D252112C7CA095856BD /* ObjectCaptureFlowView.swift */,
+				C0FD7A3C01E78ACC107AEF10 /* ObjectReconstructor.swift */,
 				36634BBF4BF9036D23B8D57F /* RoomPlanAdapter.swift */,
 				E2CA3B599C8DA730DED1551B /* RoomScanView.swift */,
 			);
@@ -313,8 +319,10 @@
 				BC884DE51F3748441749A99E /* JobDetailView.swift in Sources */,
 				C0C78CF4C72688B457E3E56A /* JobListView.swift in Sources */,
 				6058364F550C33740D14C64D /* JobStore.swift in Sources */,
+				85AC9866F3F6878C88BAA8E5 /* LiDARMeshScanView.swift in Sources */,
 				425E380A83E01532EB49D30D /* ModelAndFilesViews.swift in Sources */,
 				78F7E59CC24925F72EFAC6C2 /* ObjectCaptureFlowView.swift in Sources */,
+				C3B3F117DAEC151B1EEF9EA3 /* ObjectReconstructor.swift in Sources */,
 				BC80846EFA3D664DAEC5646D /* PDFPlanRenderer.swift in Sources */,
 				8FDB9AE9FC4DC4B9C1025118 /* PlanCGDrawer.swift in Sources */,
 				1B53745D0BFCAC52E82BDFDF /* RoomPlanAdapter.swift in Sources */,

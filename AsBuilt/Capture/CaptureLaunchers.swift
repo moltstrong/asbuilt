@@ -29,9 +29,24 @@ struct ObjectCaptureLauncher: View {
     }
 }
 
+/// LiDAR Mesh scan (ARKit scene reconstruction, no photogrammetry).
+struct MeshScanLauncher: View {
+    let jobID: UUID
+    var onFinished: (UUID?) -> Void
+
+    var body: some View {
+        #if os(iOS) && !targetEnvironment(simulator)
+        LiDARMeshScanView(jobID: jobID, onFinished: onFinished)
+        #else
+        UnsupportedCaptureView(kind: .mesh, message: DeviceCapabilitiesSnapshot.meshMessage)
+        #endif
+    }
+}
+
 enum DeviceCapabilitiesSnapshot {
     static let roomMessage = "Room scanning uses Apple RoomPlan and needs a LiDAR iPhone or iPad Pro."
     static let objectMessage = "Object capture uses Apple Object Capture and needs a LiDAR iPhone or iPad Pro on iOS 17+."
+    static let meshMessage = "LiDAR Mesh needs an iPhone or iPad with a LiDAR scanner (iPhone 12 Pro or later Pro model, iPad Pro 2020 or later)."
 }
 
 struct UnsupportedCaptureView: View {

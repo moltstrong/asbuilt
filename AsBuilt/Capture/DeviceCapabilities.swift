@@ -21,6 +21,9 @@ struct DeviceCapabilities {
     var roomPlanSupported: Bool
     var objectCaptureSupported: Bool
     var onDeviceReconstruction: Bool
+    /// ARKit scene reconstruction (LiDAR Mesh scan). Same check as `hasLiDAR`.
+    var meshScanSupported: Bool { hasLiDAR }
+    var meshClassification: Bool
     var cameraStatus: AVAuthorizationStatus
 
     @MainActor
@@ -32,8 +35,10 @@ struct DeviceCapabilities {
         #endif
 
         var lidar = false
+        var classification = false
         #if canImport(ARKit) && !targetEnvironment(simulator)
-        lidar = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
+        lidar = ARWorldTrackingConfiguration.isSupported && ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
+        classification = lidar && ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification)
         #endif
 
         var roomPlan = false
@@ -51,7 +56,7 @@ struct DeviceCapabilities {
         return DeviceCapabilities(isSimulator: simulator, deviceModel: modelIdentifier(),
                                   systemVersion: "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)",
                                   hasLiDAR: lidar, roomPlanSupported: roomPlan, objectCaptureSupported: objectCapture,
-                                  onDeviceReconstruction: reconstruction,
+                                  onDeviceReconstruction: reconstruction, meshClassification: classification,
                                   cameraStatus: AVCaptureDevice.authorizationStatus(for: .video))
     }
 
@@ -71,6 +76,13 @@ struct DeviceCapabilities {
     var roomScanBlocker: String? {
         if isSimulator { return "Room scanning needs a real iPhone or iPad with LiDAR. The Simulator has no camera or depth sensor." }
         if !roomPlanSupported { return "Room scanning needs LiDAR (iPhone 12 Pro or later Pro model, or iPad Pro 2020 or later)." }
+        if cameraStatus == .denied || cameraStatus == .restricted { return "Camera access is off. Enable it in Settings > AsBuilt." }
+        return nil
+    }
+
+    var meshScanBlocker: String? {
+        if isSimulator { return "LiDAR Mesh needs a real iPhone or iPad with LiDAR. The Simulator has no depth sensor." }
+        if !meshScanSupported { return DeviceCapabilitiesSnapshot.meshMessage }
         if cameraStatus == .denied || cameraStatus == .restricted { return "Camera access is off. Enable it in Settings > AsBuilt." }
         return nil
     }

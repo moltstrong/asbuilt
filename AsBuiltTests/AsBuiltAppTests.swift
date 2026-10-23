@@ -153,4 +153,158 @@ final class AsBuiltAppTests: XCTestCase {
         XCTAssertNotNil(caps.objectCaptureBlocker)
         #endif
     }
+
+    // MARK: LiDAR Mesh scans and model decoding (build 5)
+
+    /// job.json exactly as builds 1-4 wrote it (no mesh kind, no measurements/attempts keys).
+    private static let build4JobJSON = """
+    {
+      "address" : "1 Main St",
+      "captures" : [
+        {
+          "createdAt" : "2026-10-22T18:01:02Z",
+          "id" : "11111111-2222-4333-8444-555555555555",
+          "imageCount" : 14,
+          "kind" : "object",
+          "notes" : "",
+          "origin" : "objectCapture",
+          "status" : "imagesOnly",
+          "statusMessage" : "Reconstruction failed (The operation couldn’t be completed. (CoreOC.PhotogrammetrySession.Error error 6.)). Photos saved: reconstruct on a Mac.",
+          "title" : "Object 1"
+        },
+        {
+          "createdAt" : "2026-10-22T17:00:00Z",
+          "id" : "11111111-2222-4333-8444-666666666666",
+          "kind" : "room",
+          "notes" : "",
+          "origin" : "roomPlan",
+          "status" : "complete",
+          "title" : "Kitchen"
+        }
+      ],
+      "client" : "Smith",
+      "createdAt" : "2026-10-22T16:00:00Z",
+      "id" : "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE",
+      "isDemo" : false,
+      "name" : "Smith Kitchen",
+      "notes" : "",
+      "updatedAt" : "2026-10-22T18:05:00Z"
+    }
+    """
+
+    private static func decoder() -> JSONDecoder {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }
+
+    func testBuild4JobJSONStillDecodes() throws {
+        let job = try Self.decoder().decode(Job.self, from: Data(Self.build4JobJSON.utf8))
+        XCTAssertEqual(job.captures.count, 2)
+        XCTAssertEqual(job.objectCaptures.first?.status, .imagesOnly)
+        XCTAssertEqual(job.objectCaptures.first?.imageCount, 14)
+        XCTAssertNil(job.objectCaptures.first?.measurements)
+        XCTAssertNil(job.objectCaptures.first?.reconstructionAttempts)
+        XCTAssertEqual(job.roomCaptures.first?.origin, .roomPlan)
+        XCTAssertTrue(job.meshCaptures.isEmpty)
+
+        // And the store loads such a file from disk.
+        let dir = root.appendingPathComponent(job.id.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(Self.build4JobJSON.utf8).write(to: dir.appendingPathComponent("job.json"))
+        XCTAssertEqual(makeStore().job(job.id)?.captures.count, 2)
+    }
+
+    func testUnknownFutureValuesDoNotDropTheJob() throws {
+        let json = Self.build4JobJSON
+            .replacingOccurrences(of: "\"kind\" : \"object\"", with: "\"kind\" : \"pointCloud\"")
+            .replacingOccurrences(of: "\"origin\" : \"roomPlan\"", with: "\"origin\" : \"satellite\"")
+            .replacingOccurrences(of: "\"status\" : \"complete\"", with: "\"status\" : \"queued\"")
+        let job = try Self.decoder().decode(Job.self, from: Data(json.utf8))
+        XCTAssertEqual(job.captures.count, 2)
+        XCTAssertEqual(job.captures[0].kind, .object)
+        XCTAssertEqual(job.captures[1].origin, .unknown)
+        XCTAssertEqual(job.captures[1].status, .failed)
+    }
+
+    func testMeshCaptureRoundTrip() throws {
+        let m = DemoMeshScan.bedroomMesh().measurements
+        let capture = Capture(kind: .mesh, origin: .lidarMesh, title: "Mech room", measurements: m, reconstructionAttempts: nil)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let back = try Self.decoder().decode(Capture.self, from: encoder.encode(capture))
+        XCTAssertEqual(back.kind, .mesh)
+        XCTAssertEqual(back.origin, .lidarMesh)
+        XCTAssertEqual(back.measurements, m)
+        XCTAssertEqual(back.measurements?.triangleCount, m.triangleCount)
+    }
+
+    func testDemoJobHasLiDARMeshScanWithExports() async throws {
+        let store = makeStore()
+        store.ensureDemoJob()
+        let job = try XCTUnwrap(store.job(SampleData.demoJobID))
+        XCTAssertEqual(job.meshCaptures.map(\.id), [SampleData.demoMeshCaptureID])
+        // Launch path: JSON only, no mesh files yet.
+        XCTAssertNil(store.modelURL(job: job.id, capture: SampleData.demoMeshCaptureID))
+
+        await store.prepareDemoExports()
+        XCTAssertEqual(store.demoStatus, .ready)
+        let names = Set(store.files(job: job.id, capture: SampleData.demoMeshCaptureID).map(\.lastPathComponent))
+        for expected in [CaptureFile.modelUSDZ, CaptureFile.meshOBJ, CaptureFile.meshMTL, CaptureFile.meshPLY,
+                         CaptureFile.meshCSV, CaptureFile.scanInfo] {
+            XCTAssertTrue(names.contains(expected), "missing \(expected), have \(names)")
+        }
+        let m = try XCTUnwrap(store.meshMeasurements(job: job.id, capture: SampleData.demoMeshCaptureID))
+        XCTAssertEqual(m.width, 14 * 0.3048, accuracy: 0.015)
+        XCTAssertEqual(m.depth, 12 * 0.3048, accuracy: 0.015)
+        XCTAssertEqual(m.height, 8 * 0.3048, accuracy: 0.015)
+        XCTAssertNotNil(store.capture(job: job.id, capture: SampleData.demoMeshCaptureID)?.measurements)
+
+        // The 3D tab viewer path: SceneKit loads the mesh USDZ with one node per surface class.
+        let url = try XCTUnwrap(store.modelURL(job: job.id, capture: SampleData.demoMeshCaptureID))
+        XCTAssertTrue(JobStore.isCurrentRoomModel(url))
+        let scene = try SCNScene(url: url, options: [.checkConsistency: false])
+        var geometryNodes = 0
+        scene.rootNode.enumerateHierarchy { node, _ in if node.geometry != nil { geometryNodes += 1 } }
+        XCTAssertGreaterThanOrEqual(geometryNodes, MeshClass.allCases.count - 1)
+        let (minV, maxV) = scene.rootNode.boundingBox
+        XCTAssertEqual(Double(maxV.y - minV.y), 8 * 0.3048, accuracy: 0.05)
+
+        // Units switch rewrites measurements.csv.
+        let csvURL = store.captureDirectory(job: job.id, capture: SampleData.demoMeshCaptureID).appendingPathComponent(CaptureFile.meshCSV)
+        let csv = try String(contentsOf: csvURL, encoding: .utf8)
+        XCTAssertTrue(csv.contains("Width (X, longest side)"))
+    }
+
+    func testOldDemoJobGainsTheMeshScan() throws {
+        let store = makeStore()
+        store.ensureDemoJob()
+        var job = try XCTUnwrap(store.job(SampleData.demoJobID))
+        job.captures.removeAll { $0.kind == .mesh } // what builds <= 4 left on disk
+        store.save(job, touch: false)
+        XCTAssertTrue(makeStore().job(SampleData.demoJobID)?.meshCaptures.isEmpty == true)
+        let relaunch = makeStore()
+        relaunch.ensureDemoJob()
+        XCTAssertEqual(relaunch.job(SampleData.demoJobID)?.meshCaptures.count, 1)
+        XCTAssertEqual(relaunch.job(SampleData.demoJobID)?.roomCaptures.count, 2)
+    }
+
+    func testMeshStageCrashLoopBreaker() async throws {
+        defaults.set(JobStore.DemoStage.mesh.rawValue, forKey: JobStore.demoInFlightKey)
+        let store = makeStore()
+        store.ensureDemoJob()
+        await store.prepareDemoExports()
+        XCTAssertNotNil(store.demoNotice)
+        XCTAssertNil(store.modelURL(job: SampleData.demoJobID, capture: SampleData.demoMeshCaptureID))
+        XCTAssertNotNil(store.modelURL(job: SampleData.demoJobID, capture: SampleData.demoCaptureID))
+        XCTAssertEqual(Router.initialPath(for: "mesh").count, 2)
+        XCTAssertEqual(Router.initialPath(for: "mesh-files").count, 2)
+    }
+
+    func testReconstructionMessageIsPlainLanguage() {
+        let e = ReconstructionErrorExplainer.explain(domain: "CoreOC.PhotogrammetrySession.Error", code: 6, imageCount: 80)
+        XCTAssertFalse(e.message.contains("CoreOC"))
+        XCTAssertTrue(e.message.contains("line up the photos"))
+        XCTAssertTrue(e.technical.contains("processError"))
+    }
 }

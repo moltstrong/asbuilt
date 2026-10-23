@@ -29,7 +29,7 @@ enum Route: Hashable {
 /// Launch arguments used for demos, UI review and CI screenshots, e.g.
 /// `xcrun simctl launch booted com.moltstrong.asbuilt -AsBuiltScreen plan`.
 struct LaunchOptions {
-    /// jobs | job | plan | takeoff | takeoff-walls | model | files | kitchen | capabilities | settings
+    /// jobs | job | plan | takeoff | takeoff-walls | model | files | kitchen | mesh | mesh-files | mesh-quicklook | capabilities | settings
     var screen: String?
     var resetDemo: Bool
 
@@ -38,6 +38,9 @@ struct LaunchOptions {
         return LaunchOptions(screen: defaults.string(forKey: "AsBuiltScreen"),
                              resetDemo: defaults.bool(forKey: "AsBuiltResetDemo"))
     }
+
+    /// `-AsBuiltScreen mesh-quicklook`: the 3D tab opens AR Quick Look on the model once (CI screenshots).
+    static var autoOpenQuickLook: Bool { LaunchOptions.current.screen == "mesh-quicklook" }
 
     /// Section the takeoff screen should scroll to on appear (CI screenshots).
     static var takeoffScrollTarget: String? {
@@ -64,6 +67,8 @@ final class Router: ObservableObject {
         case "model": return [.job(job), .capture(job: job, capture: bedroom, tab: .model)]
         case "files": return [.job(job), .capture(job: job, capture: bedroom, tab: .files)]
         case "kitchen": return [.job(job), .capture(job: job, capture: kitchen, tab: .plan)]
+        case "mesh", "mesh-quicklook": return [.job(job), .capture(job: job, capture: SampleData.demoMeshCaptureID, tab: .model)]
+        case "mesh-files": return [.job(job), .capture(job: job, capture: SampleData.demoMeshCaptureID, tab: .files)]
         case "capabilities": return [.capabilities]
         case "settings": return [.settings]
         default: return []

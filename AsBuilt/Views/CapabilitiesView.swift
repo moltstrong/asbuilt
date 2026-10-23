@@ -28,7 +28,12 @@ struct CapabilitiesView: View {
                             detail: caps.objectCaptureBlocker ?? "Ready: guided 3D capture of equipment, fixtures, damage")
                         Divider()
                         row("On-device 3D reconstruction", ok: caps.onDeviceReconstruction,
-                            detail: caps.onDeviceReconstruction ? "model.usdz is built on the phone" : "Photos are kept; reconstruct on a Mac")
+                            detail: caps.onDeviceReconstruction ? "model.usdz is built on the phone (with automatic retries)" : "Photos are kept; reconstruct on a Mac")
+                        Divider()
+                        row("LiDAR Mesh scan", ok: caps.meshScanSupported,
+                            detail: caps.meshScanBlocker ?? (caps.meshClassification
+                                ? "Ready: live 3D mesh of any space or object, classified walls/floor/doors. No photogrammetry."
+                                : "Ready: live 3D mesh of any space or object. No photogrammetry."))
                         Divider()
                         row("Camera permission", ok: caps.cameraStatus == .authorized,
                             warn: caps.cameraStatus == .notDetermined, detail: cameraText(caps.cameraStatus))

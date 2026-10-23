@@ -149,7 +149,7 @@ struct JobRow: View {
                     Label(job.client, systemImage: "person")
                         .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }
-                Label(Self.countsText(rooms: job.roomCaptures.count, objects: job.objectCaptures.count),
+                Label(Self.countsText(rooms: job.roomCaptures.count, objects: job.objectCaptures.count, scans: job.meshCaptures.count),
                       systemImage: "square.split.bottomrightquarter")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -163,8 +163,10 @@ struct JobRow: View {
         .contentShape(Rectangle())
     }
 
-    static func countsText(rooms: Int, objects: Int) -> String {
-        "\(rooms) \(rooms == 1 ? "room" : "rooms") · \(objects) \(objects == 1 ? "object" : "objects")"
+    static func countsText(rooms: Int, objects: Int, scans: Int = 0) -> String {
+        var text = "\(rooms) \(rooms == 1 ? "room" : "rooms") · \(objects) \(objects == 1 ? "object" : "objects")"
+        if scans > 0 { text += " · \(scans) \(scans == 1 ? "mesh" : "meshes")" }
+        return text
     }
 }
 

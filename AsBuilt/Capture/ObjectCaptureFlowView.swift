@@ -4,8 +4,10 @@ import AsBuiltCore
 #if os(iOS) && !targetEnvironment(simulator) && !targetEnvironment(macCatalyst)
 import RealityKit
 
-/// Guided Object Capture (iOS 17+, LiDAR devices) followed by on-device reconstruction to model.usdz.
-/// The photo folder is kept so the office can rebuild a higher-detail model on a Mac.
+/// Guided Object Capture (iOS 17+, LiDAR devices) followed by on-device reconstruction to model.usdz
+/// with an automatic retry chain (`ObjectReconstructor`). The photo folder is always kept, so the
+/// model can be rebuilt later ("Retry 3D build") or on a Mac. If Apple's photogrammetry fails on
+/// this phone, the crew is offered the LiDAR Mesh scan, which does not use photogrammetry.
 struct ObjectCaptureFlowView: View {
     let jobID: UUID
     var onFinished: (UUID?) -> Void
@@ -14,16 +16,20 @@ struct ObjectCaptureFlowView: View {
         case capturing
         case reconstructing
         case done
+        /// Photos saved, every reconstruction attempt failed (plain-language message).
+        case buildFailed(String)
         case failed(String)
     }
 
     @EnvironmentObject private var store: JobStore
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var reconstructor = ObjectReconstructor()
     @State private var session: ObjectCaptureSession?
     @State private var captureID = UUID()
     @State private var phase: Phase = .capturing
-    @State private var progress: Double = 0
     @State private var shots = 0
+    @State private var showingMeshScan = false
+    @State private var savedMeshID: UUID?
 
     var body: some View {
         ZStack {
@@ -37,44 +43,45 @@ struct ObjectCaptureFlowView: View {
             case .capturing:
                 if session == nil { ProgressView().tint(.white) }
             case .reconstructing:
-                VStack(spacing: 16) {
-                    Text("Building 3D model").font(.title2.bold())
-                    ProgressView(value: progress)
-                        .progressViewStyle(.linear)
-                        .frame(maxWidth: 280)
-                    Text("\(Int(progress * 100))% · \(shots) photos").monospacedDigit()
-                    Text("Keep the app open. Photos are already saved to the job.")
-                        .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                }
-                .padding(24)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
-                .padding()
+                ReconstructionProgressCard(reconstructor: reconstructor, photos: shots)
+                    .padding()
             case .done:
-                VStack(spacing: 16) {
-                    Image(systemName: "checkmark.circle.fill").font(.system(size: 56)).foregroundStyle(Theme.ok)
-                    Text("Object saved").font(.title2.bold())
-                    Button("Open") {
-                        onFinished(captureID)
-                        dismiss()
+                resultCard(icon: "checkmark.circle.fill", color: Theme.ok, title: "Object saved", message: nil) {
+                    Button("Open") { finish(open: captureID) }
+                        .buttonStyle(BigButtonStyle())
+                }
+            case .buildFailed(let message):
+                resultCard(icon: "exclamationmark.triangle.fill", color: Theme.warn, title: "Photos saved, no 3D model yet",
+                           message: message) {
+                    Button {
+                        Task { await reconstruct(reason: "Retry 3D build (capture screen)") }
+                    } label: {
+                        Label("Retry 3D build", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(BigButtonStyle())
+                    Button {
+                        showingMeshScan = true
+                    } label: {
+                        Label("Scan it with LiDAR mesh instead", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                    }
+                    .buttonStyle(BigButtonStyle(filled: false))
+                    .accessibilityIdentifier("meshInsteadButton")
+                    Button("Close") { finish(open: captureID) }
+                        .buttonStyle(BigButtonStyle(filled: false, color: .secondary))
                 }
-                .padding(24)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
-                .padding()
             case .failed(let message):
-                VStack(spacing: 16) {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 48)).foregroundStyle(Theme.warn)
-                    Text(message).multilineTextAlignment(.center)
+                resultCard(icon: "exclamationmark.triangle.fill", color: Theme.warn, title: "Capture stopped", message: message) {
+                    Button {
+                        showingMeshScan = true
+                    } label: {
+                        Label("Scan it with LiDAR mesh instead", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                    }
+                    .buttonStyle(BigButtonStyle(filled: false))
                     Button("Close") {
-                        onFinished(store.capture(job: jobID, capture: captureID) == nil ? nil : captureID)
-                        dismiss()
+                        finish(open: store.capture(job: jobID, capture: captureID) == nil ? nil : captureID)
                     }
                     .buttonStyle(BigButtonStyle())
                 }
-                .padding(24)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
-                .padding()
             }
         }
         .task { start() }
@@ -84,6 +91,28 @@ struct ObjectCaptureFlowView: View {
         .onChange(of: session?.numberOfShotsTaken) { _, count in
             if let count { shots = count }
         }
+        .fullScreenCover(isPresented: $showingMeshScan, onDismiss: {
+            // Open the new mesh scan once its cover is gone (never dismiss two covers at once).
+            if let savedMeshID { finish(open: savedMeshID) }
+        }) {
+            MeshScanLauncher(jobID: jobID) { meshID in savedMeshID = meshID }
+                .environmentObject(store)
+        }
+    }
+
+    private func resultCard<Buttons: View>(icon: String, color: Color, title: String, message: String?,
+                                           @ViewBuilder buttons: () -> Buttons) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: icon).font(.system(size: 52)).foregroundStyle(color)
+            Text(title).font(.title2.bold()).multilineTextAlignment(.center)
+            if let message {
+                Text(message).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            }
+            buttons()
+        }
+        .padding(24)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .padding()
     }
 
     private var captureDirectory: URL { store.captureDirectory(job: jobID, capture: captureID) }
@@ -91,7 +120,7 @@ struct ObjectCaptureFlowView: View {
     private var checkpointDirectory: URL { captureDirectory.appendingPathComponent(CaptureFile.checkpoint, isDirectory: true) }
 
     private func start() {
-        guard session == nil else { return }
+        guard session == nil, phase == .capturing else { return }
         guard ObjectCaptureSession.isSupported else {
             phase = .failed("Object Capture needs an iPhone or iPad with LiDAR running iOS 17 or later.")
             return
@@ -119,6 +148,11 @@ struct ObjectCaptureFlowView: View {
         dismiss()
     }
 
+    private func finish(open id: UUID?) {
+        onFinished(id)
+        dismiss()
+    }
+
     private func handle(_ state: ObjectCaptureSession.CaptureState?) {
         switch state {
         case .completed?:
@@ -126,63 +160,68 @@ struct ObjectCaptureFlowView: View {
             shots = count
             // Release the capture session (camera + memory) before reconstruction starts.
             session = nil
-            Task { await reconstruct(imageCount: count) }
+            let number = (store.job(jobID)?.objectCaptures.count ?? 0) + 1
+            let capture = Capture(id: captureID, kind: .object, origin: .objectCapture, title: "Object \(number)",
+                                  status: .processing, imageCount: count)
+            store.addCapture(capture, to: jobID)
+            Task { await reconstruct(reason: "after capture, \(count) shots") }
         case .failed(let error)?:
             session = nil
             if let captureError = error as? ObjectCaptureSession.Error, case .cancelled = captureError { return }
-            phase = .failed("Capture stopped: \(error.localizedDescription)")
+            let ns = error as NSError
+            let explanation = ReconstructionErrorExplainer.explain(domain: ns.domain, code: ns.code,
+                                                                   description: String(reflecting: error), imageCount: shots)
+            phase = .failed("\(explanation.message)\n\n(\(explanation.technical))")
         default:
             break
         }
     }
 
-    private func reconstruct(imageCount: Int) async {
+    private func reconstruct(reason: String) async {
+        guard !reconstructor.isRunning, var capture = store.capture(job: jobID, capture: captureID) else { return }
         phase = .reconstructing
-        let number = (store.job(jobID)?.objectCaptures.count ?? 0) + 1
-        var capture = Capture(id: captureID, kind: .object, origin: .objectCapture, title: "Object \(number)",
-                              status: .processing, imageCount: imageCount)
-        store.addCapture(capture, to: jobID)
-        let modelURL = captureDirectory.appendingPathComponent(CaptureFile.modelUSDZ)
-
-        guard PhotogrammetrySession.isSupported else {
-            capture.status = .imagesOnly
-            capture.statusMessage = "On-device reconstruction is not supported here. Photos saved: reconstruct on a Mac."
-            store.updateCapture(capture, in: jobID)
+        capture.status = .processing
+        capture.statusMessage = nil
+        store.updateCapture(capture, in: jobID)
+        let outcome = await reconstructor.run(captureDirectory: captureDirectory, reason: reason)
+        capture = store.capture(job: jobID, capture: captureID) ?? capture
+        capture.reconstructionAttempts = (capture.reconstructionAttempts ?? 0) + outcome.attempts
+        if outcome.succeeded {
+            capture.status = .complete
+            capture.statusMessage = nil
             phase = .done
-            return
-        }
-        do {
-            var configuration = PhotogrammetrySession.Configuration()
-            configuration.checkpointDirectory = checkpointDirectory
-            let photogrammetry = try PhotogrammetrySession(input: imagesDirectory, configuration: configuration)
-            try photogrammetry.process(requests: [.modelFile(url: modelURL)])
-            outputs: for try await output in photogrammetry.outputs {
-                switch output {
-                case .requestProgress(_, let fraction):
-                    progress = fraction
-                case .requestError(_, let error):
-                    throw error
-                case .processingCancelled:
-                    throw CancellationError()
-                case .processingComplete:
-                    break outputs
-                default:
-                    break
-                }
-            }
-            if FileManager.default.fileExists(atPath: modelURL.path) {
-                capture.status = .complete
-                capture.statusMessage = nil
-            } else {
-                capture.status = .imagesOnly
-                capture.statusMessage = "No model was produced. Photos saved: reconstruct on a Mac."
-            }
-        } catch {
+        } else {
             capture.status = .imagesOnly
-            capture.statusMessage = "Reconstruction failed (\(error.localizedDescription)). Photos saved: reconstruct on a Mac."
+            capture.statusMessage = outcome.message
+            phase = .buildFailed(outcome.message ?? "Apple's 3D builder couldn't finish this model.")
         }
         store.updateCapture(capture, in: jobID)
-        phase = .done
+        store.touchExports()
+    }
+}
+
+/// "Building 3D model" card: attempt N of 3, stage, progress.
+struct ReconstructionProgressCard: View {
+    @ObservedObject var reconstructor: ObjectReconstructor
+    var photos: Int?
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Text("Building 3D model").font(.title2.bold())
+            ProgressView(value: reconstructor.progress)
+                .progressViewStyle(.linear)
+                .frame(maxWidth: 280)
+            Text("\(Int(reconstructor.progress * 100))%\(photos.map { " · \($0) photos" } ?? "")")
+                .monospacedDigit()
+            Text("Attempt \(max(1, reconstructor.attemptNumber)) of \(reconstructor.attemptCount)\(reconstructor.stageText.isEmpty ? "" : " · \(reconstructor.stageText)")")
+                .font(.subheadline.weight(.semibold))
+            Text("Keep the app open. If Apple's builder fails, AsBuilt retries with different settings automatically. Photos are already saved to the job.")
+                .font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(24)
+        .frame(maxWidth: 420)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
     }
 }
 
@@ -191,6 +230,11 @@ struct ObjectCaptureControls: View {
     let session: ObjectCaptureSession
     var onCancel: () -> Void
 
+    @State private var passes = 1
+    @State private var confirmEarlyFinish = false
+
+    private var shots: Int { session.numberOfShotsTaken }
+
     var body: some View {
         VStack(spacing: 12) {
             HStack {
@@ -198,10 +242,14 @@ struct ObjectCaptureControls: View {
                     .buttonStyle(BigButtonStyle(filled: false, color: .white))
                     .frame(width: 120)
                 Spacer()
-                Text("\(session.numberOfShotsTaken) photos")
-                    .font(.headline.monospacedDigit())
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(shots) photos").font(.headline.monospacedDigit())
+                    if session.state == .capturing {
+                        Text("Pass \(passes) of 3").font(.caption.weight(.semibold))
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: Capsule())
             }
             Spacer()
             if let hint = feedbackText {
@@ -213,13 +261,30 @@ struct ObjectCaptureControls: View {
             actionArea
         }
         .padding()
+        .confirmationDialog(earlyFinishTitle, isPresented: $confirmEarlyFinish, titleVisibility: .visible) {
+            Button("Keep capturing", role: .cancel) {}
+            Button("Finish anyway", role: .destructive) { session.finish() }
+        } message: {
+            Text(earlyFinishMessage)
+        }
+    }
+
+    private var earlyFinishTitle: String {
+        shots < ObjectCaptureGuidance.minimumShots ? "Only \(shots) photos" : "Finish before the circle is complete?"
+    }
+
+    private var earlyFinishMessage: String {
+        if shots < ObjectCaptureGuidance.minimumShots {
+            return "With fewer than \(ObjectCaptureGuidance.minimumShots) photos the 3D build will very likely fail. Keep walking slowly around the object until the dial is complete."
+        }
+        return "Models line up best after a full circle (3 passes at different heights). Finishing now may produce no model."
     }
 
     @ViewBuilder
     private var actionArea: some View {
         switch session.state {
         case .ready:
-            instruction("Point at the object you want to capture.")
+            instruction("Point at the object you want to capture. Use good light and a textured surface under it.")
             Button("Continue") { _ = session.startDetecting() }
                 .buttonStyle(BigButtonStyle())
         case .detecting:
@@ -228,17 +293,26 @@ struct ObjectCaptureControls: View {
                 .buttonStyle(BigButtonStyle())
         case .capturing:
             if session.userCompletedScanPass {
-                instruction("Scan pass complete.")
+                instruction(passes < 3
+                            ? "Pass \(passes) complete. Do another circle \(passes == 1 ? "lower, aiming up" : "higher, aiming down") for a model that lines up."
+                            : "Pass \(passes) complete. You can finish now.")
                 HStack(spacing: 12) {
-                    Button("Another pass") { session.beginNewScanPass() }
-                        .buttonStyle(BigButtonStyle(filled: false, color: .white))
+                    Button("Another pass") {
+                        passes += 1
+                        session.beginNewScanPass()
+                    }
+                    .buttonStyle(BigButtonStyle(filled: passes < 3, color: passes < 3 ? Theme.accent : .white))
                     Button("Finish") { session.finish() }
-                        .buttonStyle(BigButtonStyle())
+                        .buttonStyle(BigButtonStyle(filled: passes >= 3, color: passes >= 3 ? Theme.accent : .white))
                 }
             } else {
-                instruction("Walk slowly all the way around the object.")
-                Button("Finish now") { session.finish() }
-                    .buttonStyle(BigButtonStyle(filled: false, color: .white))
+                instruction(shots < ObjectCaptureGuidance.minimumShots
+                            ? "Walk slowly all the way around the object. Keep going until the dial is complete."
+                            : "Keep circling until the dial is complete.")
+                Button(shots < ObjectCaptureGuidance.minimumShots ? "Finish early (\(shots)/\(ObjectCaptureGuidance.minimumShots))" : "Finish now") {
+                    confirmEarlyFinish = true
+                }
+                .buttonStyle(BigButtonStyle(filled: false, color: .white))
             }
         case .finishing:
             ProgressView("Saving photos…").tint(.white).foregroundStyle(.white)
@@ -251,6 +325,7 @@ struct ObjectCaptureControls: View {
         Text(text)
             .font(.subheadline.weight(.semibold))
             .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
             .shadow(radius: 4)
     }
 

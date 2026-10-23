@@ -10,6 +10,7 @@ struct JobDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showingRoomScan = false
     @State private var showingObjectCapture = false
+    @State private var showingMeshScan = false
     @State private var showingImporter = false
     @State private var showingEditor = false
     @State private var confirmDelete = false
@@ -34,17 +35,22 @@ struct JobDetailView: View {
                 infoCard(job)
 
                 SectionHeader(title: "Capture", systemImage: "camera.viewfinder")
-                HStack(spacing: 12) {
-                    captureButton(title: "Scan room", subtitle: "LiDAR floor plan", icon: "square.split.bottomrightquarter",
+                HStack(spacing: 10) {
+                    captureButton(title: "Scan room", subtitle: "Floor plan", icon: "square.split.bottomrightquarter",
                                   blocked: capabilities?.roomScanBlocker) {
                         showingRoomScan = true
                     }
                     .accessibilityIdentifier("scanRoomButton")
-                    captureButton(title: "Capture object", subtitle: "3D model", icon: "cube.transparent",
+                    captureButton(title: "Capture object", subtitle: "Photo 3D", icon: "cube.transparent",
                                   blocked: capabilities?.objectCaptureBlocker) {
                         showingObjectCapture = true
                     }
                     .accessibilityIdentifier("captureObjectButton")
+                    captureButton(title: "LiDAR Mesh", subtitle: "Any space/object", icon: CaptureKind.mesh.icon,
+                                  blocked: capabilities?.meshScanBlocker) {
+                        showingMeshScan = true
+                    }
+                    .accessibilityIdentifier("lidarMeshButton")
                 }
                 if let blocker = capabilities?.roomScanBlocker {
                     Label(blocker, systemImage: "info.circle")
@@ -73,6 +79,19 @@ struct JobDetailView: View {
                 ForEach(job.objectCaptures.sorted { $0.createdAt < $1.createdAt }) { capture in
                     NavigationLink(value: Route.capture(job: job.id, capture: capture.id, tab: .model)) {
                         ObjectCaptureRow(capture: capture)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                SectionHeader(title: "LiDAR Mesh scans (\(job.meshCaptures.count))", systemImage: CaptureKind.mesh.icon)
+                if job.meshCaptures.isEmpty {
+                    Text("No mesh scans yet. LiDAR Mesh captures any space, object or MEP run as a 3D mesh (USDZ, OBJ, PLY) without photos.")
+                        .foregroundStyle(.secondary)
+                        .card()
+                }
+                ForEach(job.meshCaptures.sorted { $0.createdAt < $1.createdAt }) { capture in
+                    NavigationLink(value: Route.capture(job: job.id, capture: capture.id, tab: .model)) {
+                        MeshCaptureRow(jobID: job.id, capture: capture)
                     }
                     .buttonStyle(.plain)
                 }
@@ -105,6 +124,12 @@ struct JobDetailView: View {
         .fullScreenCover(isPresented: $showingRoomScan) {
             RoomScanLauncher(jobID: job.id) { captureID in
                 if let captureID { router.path.append(.capture(job: job.id, capture: captureID, tab: .plan)) }
+            }
+            .environmentObject(store)
+        }
+        .fullScreenCover(isPresented: $showingMeshScan) {
+            MeshScanLauncher(jobID: job.id) { captureID in
+                if let captureID { router.path.append(.capture(job: job.id, capture: captureID, tab: .model)) }
             }
             .environmentObject(store)
         }
@@ -157,13 +182,20 @@ struct JobDetailView: View {
     private func captureButton(title: String, subtitle: String, icon: String, blocked: String?,
                                action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 8) {
-                Image(systemName: icon).font(.system(size: 30, weight: .semibold))
-                Text(title).font(.headline)
+            VStack(spacing: 6) {
+                Image(systemName: icon).font(.system(size: 26, weight: .semibold))
+                Text(title).font(.subheadline.weight(.bold))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
                 Text(blocked == nil ? subtitle : "Needs LiDAR")
-                    .font(.caption.weight(.semibold))
+                    .font(.caption2.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
                     .opacity(0.85)
             }
+            .padding(.horizontal, 4)
             .frame(maxWidth: .infinity, minHeight: 120)
             .foregroundStyle(blocked == nil ? Color.white : Color.secondary)
             .background(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous)
@@ -245,7 +277,7 @@ struct ObjectCaptureRow: View {
         let photos = capture.imageCount.map { " · \($0) photos" } ?? ""
         switch capture.status {
         case .complete: return "3D model ready" + photos
-        case .imagesOnly: return "Photos only, reconstruct on Mac" + photos
+        case .imagesOnly: return "Photos saved, 3D build failed: retry" + photos
         case .processing: return "Processing…" + photos
         case .failed: return "Failed" + photos
         }
@@ -257,6 +289,45 @@ struct ObjectCaptureRow: View {
         case .imagesOnly, .processing: return Theme.warn
         case .failed: return Theme.bad
         }
+    }
+}
+
+struct MeshCaptureRow: View {
+    let jobID: UUID
+    let capture: Capture
+    @EnvironmentObject private var store: JobStore
+    @AppStorage(Preferences.unitsKey) private var unitsRaw = UnitSystem.imperial.rawValue
+
+    var body: some View {
+        let units = UnitSystem(rawValue: unitsRaw) ?? .imperial
+        let m = store.meshMeasurements(job: jobID, capture: capture.id)
+        HStack(spacing: 14) {
+            Image(systemName: CaptureKind.mesh.icon)
+                .font(.title)
+                .foregroundStyle(Theme.accent)
+                .frame(width: 56, height: 56)
+                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 12))
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(capture.title).font(.headline)
+                    if capture.origin == .sample { Badge(text: "SAMPLE", color: .gray) }
+                    if capture.origin == .lidarMesh { Badge(text: "LIDAR", color: Theme.ok) }
+                }
+                if let m {
+                    Text(m.dimensionsText(units)).font(.subheadline.monospacedDigit())
+                    Text("\(m.triangleCount.formatted()) triangles · USDZ, OBJ, PLY")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Preparing…").font(.subheadline).foregroundStyle(Theme.warn)
+                }
+                Text(capture.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+        }
+        .card()
+        .contentShape(Rectangle())
     }
 }
 

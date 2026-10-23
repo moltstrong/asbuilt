@@ -4,11 +4,14 @@ import AsBuiltCore
 enum CaptureKind: String, Codable, CaseIterable, Hashable, Sendable {
     case room
     case object
+    /// ARKit LiDAR scene-reconstruction mesh (any space, object or MEP). Added in build 5.
+    case mesh
 
     var displayName: String {
         switch self {
         case .room: return "Room scan"
         case .object: return "Object capture"
+        case .mesh: return "LiDAR Mesh scan"
         }
     }
 
@@ -16,7 +19,14 @@ enum CaptureKind: String, Codable, CaseIterable, Hashable, Sendable {
         switch self {
         case .room: return "square.split.bottomrightquarter"
         case .object: return "cube.transparent"
+        case .mesh: return "point.3.filled.connected.trianglepath.dotted"
         }
+    }
+
+    /// Unknown values (written by a newer build) decode as `.object` so the job still loads.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = CaptureKind(rawValue: raw) ?? .object
     }
 }
 
@@ -27,14 +37,28 @@ enum CaptureOrigin: String, Codable, Hashable, Sendable {
     case objectCapture
     /// Bundled sample data built from AsBuiltCore models.
     case sample
+    /// ARKit scene reconstruction (LiDAR Mesh scan). Added in build 5.
+    case lidarMesh
+    /// Origin written by a newer build.
+    case unknown
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = CaptureOrigin(rawValue: raw) ?? .unknown
+    }
 }
 
 enum CaptureStatus: String, Codable, Hashable, Sendable {
     case complete
-    /// Photos saved; 3D reconstruction not done on device (reconstruct on a Mac).
+    /// Photos saved; on-device 3D reconstruction failed or is unavailable (retry, or reconstruct on a Mac).
     case imagesOnly
     case processing
     case failed
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = CaptureStatus(rawValue: raw) ?? .failed
+    }
 }
 
 struct Capture: Codable, Identifiable, Hashable, Sendable {
@@ -47,9 +71,14 @@ struct Capture: Codable, Identifiable, Hashable, Sendable {
     var status: CaptureStatus
     var statusMessage: String?
     var imageCount: Int?
+    /// LiDAR mesh scans: bounding box, triangle count and surface areas (also in scan-info.json).
+    var measurements: MeshMeasurements?
+    /// Object captures: on-device reconstruction attempts made so far (see reconstruction-log.txt).
+    var reconstructionAttempts: Int?
 
     init(id: UUID = UUID(), kind: CaptureKind, origin: CaptureOrigin, title: String, createdAt: Date = Date(),
-         notes: String = "", status: CaptureStatus = .complete, statusMessage: String? = nil, imageCount: Int? = nil) {
+         notes: String = "", status: CaptureStatus = .complete, statusMessage: String? = nil, imageCount: Int? = nil,
+         measurements: MeshMeasurements? = nil, reconstructionAttempts: Int? = nil) {
         self.id = id
         self.kind = kind
         self.origin = origin
@@ -59,6 +88,29 @@ struct Capture: Codable, Identifiable, Hashable, Sendable {
         self.status = status
         self.statusMessage = statusMessage
         self.imageCount = imageCount
+        self.measurements = measurements
+        self.reconstructionAttempts = reconstructionAttempts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, origin, title, createdAt, notes, status, statusMessage, imageCount, measurements, reconstructionAttempts
+    }
+
+    /// Tolerant decoding: job.json files written by builds 1-4 (no `measurements` /
+    /// `reconstructionAttempts`) and by future builds (unknown enum values) still load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        kind = try c.decodeIfPresent(CaptureKind.self, forKey: .kind) ?? .object
+        origin = try c.decodeIfPresent(CaptureOrigin.self, forKey: .origin) ?? .unknown
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? "Capture"
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(timeIntervalSince1970: 0)
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        status = try c.decodeIfPresent(CaptureStatus.self, forKey: .status) ?? .complete
+        statusMessage = try c.decodeIfPresent(String.self, forKey: .statusMessage)
+        imageCount = try c.decodeIfPresent(Int.self, forKey: .imageCount)
+        measurements = try? c.decodeIfPresent(MeshMeasurements.self, forKey: .measurements)
+        reconstructionAttempts = try c.decodeIfPresent(Int.self, forKey: .reconstructionAttempts)
     }
 }
 
@@ -88,6 +140,7 @@ struct Job: Codable, Identifiable, Hashable, Sendable {
 
     var roomCaptures: [Capture] { captures.filter { $0.kind == .room } }
     var objectCaptures: [Capture] { captures.filter { $0.kind == .object } }
+    var meshCaptures: [Capture] { captures.filter { $0.kind == .mesh } }
 }
 
 /// Well-known file names inside `Documents/Jobs/<jobId>/<captureId>/`.
@@ -102,6 +155,12 @@ enum CaptureFile {
     static let csv = "takeoff.csv"
     static let images = "Images"
     static let checkpoint = "Checkpoint"
+    static let reconstructionLog = "reconstruction-log.txt"
+    static let meshOBJ = LiDARMeshExporter.objName
+    static let meshMTL = LiDARMeshExporter.mtlName
+    static let meshPLY = LiDARMeshExporter.plyName
+    static let meshCSV = LiDARMeshExporter.csvName
+    static let scanInfo = LiDARMeshExporter.infoName
 
     static func description(for name: String) -> String {
         switch name {
@@ -115,6 +174,12 @@ enum CaptureFile {
         case csv: return "Quantity takeoff for Excel, Numbers or your estimating tool."
         case images: return "Source photos. Reconstruct at full detail on a Mac (Reality Composer Pro / PhotogrammetrySession)."
         case checkpoint: return "Reconstruction checkpoint data."
+        case reconstructionLog: return "On-device 3D build log: settings, photo count, device, iOS version and Apple's error codes. Send it with a support request."
+        case meshOBJ: return "LiDAR mesh, Wavefront OBJ (meters, Y-up, one group per surface type). Blender, SketchUp, Rhino, AutoCAD/Revit via import."
+        case meshMTL: return "Colors for mesh.obj (keep it next to the OBJ)."
+        case meshPLY: return "LiDAR mesh, binary PLY with vertex colors. MeshLab, CloudCompare, Recap."
+        case meshCSV: return "Scan size (W x D x H) and scanned surface areas by type."
+        case scanInfo: return "Scan measurements as JSON."
         default:
             if name.hasSuffix(".zip") { return "Everything in one archive." }
             return ""
@@ -131,6 +196,9 @@ enum CaptureFile {
         case "csv": return "tablecells"
         case "json": return "curlybraces"
         case "zip": return "archivebox"
+        case "obj", "ply": return "point.3.connected.trianglepath.dotted"
+        case "mtl": return "paintpalette"
+        case "txt": return "doc.text.magnifyingglass"
         default: return name == images ? "photo.stack" : "doc"
         }
     }

@@ -10,30 +10,45 @@ struct ModelTabView: View {
     let capture: Capture
 
     @EnvironmentObject private var store: JobStore
+    @EnvironmentObject private var router: Router
+    @AppStorage(Preferences.unitsKey) private var unitsRaw = UnitSystem.imperial.rawValue
     @State private var showingQuickLook = false
+    @State private var showingMeshScan = false
+    @State private var savedMeshID: UUID?
+    @State private var didAutoOpen = false
+
+    private var units: UnitSystem { UnitSystem(rawValue: unitsRaw) ?? .imperial }
 
     var body: some View {
         let url = store.modelURL(job: jobID, capture: capture.id)
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if let url {
-                    SceneModelView(url: url)
+                    SceneModelView(url: url, revision: store.exportsRevision)
                         .frame(height: 380)
                         .clipShape(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous).stroke(Theme.hairline, lineWidth: 0.5))
                         .accessibilityIdentifier("modelView")
                     Text("Drag to orbit, pinch to zoom.")
                         .font(.footnote).foregroundStyle(.secondary)
+                    if capture.kind == .mesh, let m = store.meshMeasurements(job: jobID, capture: capture.id) {
+                        MeshSummaryView(measurements: m, units: units)
+                    }
                     Button {
                         showingQuickLook = true
                     } label: {
                         Label("Open in AR Quick Look (place & measure)", systemImage: "arkit")
                     }
                     .buttonStyle(BigButtonStyle())
-                    Text(CaptureFile.description(for: url.lastPathComponent))
+                    .accessibilityIdentifier("quickLookButton")
+                    Text(capture.kind == .mesh
+                         ? "LiDAR mesh (USDZ, colored by surface type). The Files tab also has OBJ + MTL for Blender/SketchUp/AutoCAD, PLY and measurements.csv."
+                         : CaptureFile.description(for: url.lastPathComponent))
                         .font(.footnote).foregroundStyle(.secondary)
                     if capture.origin == .sample {
-                        Label("Sample room: massing model generated from plan data. A real LiDAR scan exports Apple's parametric RoomPlan USDZ.",
+                        Label(capture.kind == .mesh
+                              ? "Sample LiDAR mesh generated from the demo bedroom. A real LiDAR Mesh scan records the phone's live depth mesh."
+                              : "Sample room: massing model generated from plan data. A real LiDAR scan exports Apple's parametric RoomPlan USDZ.",
                               systemImage: "info.circle")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
@@ -41,7 +56,7 @@ struct ModelTabView: View {
                     VStack(spacing: 12) {
                         ProgressView()
                         Text("Preparing demo…").font(.headline)
-                        Text("Building the 3D model for this sample room.")
+                        Text(capture.kind == .mesh ? "Building the sample LiDAR mesh." : "Building the 3D model for this sample room.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, minHeight: 200)
@@ -49,16 +64,29 @@ struct ModelTabView: View {
                 } else {
                     VStack(spacing: 12) {
                         Image(systemName: "cube.transparent").font(.system(size: 48)).foregroundStyle(.secondary)
-                        Text(capture.kind == .object ? "No 3D model yet" : "No USDZ model for this room").font(.headline)
+                        Text(capture.kind == .room ? "No USDZ model for this room" : "No 3D model yet").font(.headline)
                         if let message = capture.statusMessage {
                             Text(message).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("statusMessage")
                         }
                         if capture.origin == .sample, let notice = store.demoNotice {
                             Text(notice).font(.footnote).multilineTextAlignment(.center).foregroundStyle(.secondary)
                         }
                         if capture.kind == .object {
-                            Text("The photos are in the Files tab. On a Mac, drop the Images folder into Reality Composer Pro (or run PhotogrammetrySession at .full / .raw detail) for a higher-detail model, then import the USDZ back here.")
+                            if capture.status == .imagesOnly || capture.status == .processing || capture.status == .failed {
+                                RetryReconstructionSection(jobID: jobID, capture: capture)
+                                Button {
+                                    showingMeshScan = true
+                                } label: {
+                                    Label("Scan it with LiDAR mesh instead", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                                }
+                                .buttonStyle(BigButtonStyle(filled: false))
+                                .accessibilityIdentifier("meshInsteadButton")
+                            }
+                            Text("The photos and reconstruction-log.txt are in the Files tab. On a Mac, drop the Images folder into Reality Composer Pro (or run PhotogrammetrySession at .full / .raw detail) for a higher-detail model, then import the USDZ back here.")
                                 .font(.footnote).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -70,12 +98,117 @@ struct ModelTabView: View {
         .fullScreenCover(isPresented: $showingQuickLook) {
             if let url { QuickLookPreview(url: url).ignoresSafeArea() }
         }
+        .task(id: url?.path) {
+            guard LaunchOptions.autoOpenQuickLook, !didAutoOpen, url != nil else { return }
+            didAutoOpen = true
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            showingQuickLook = true
+        }
+        .fullScreenCover(isPresented: $showingMeshScan, onDismiss: {
+            if let id = savedMeshID {
+                savedMeshID = nil
+                router.path.append(.capture(job: jobID, capture: id, tab: .model))
+            }
+        }) {
+            MeshScanLauncher(jobID: jobID) { meshID in savedMeshID = meshID }
+                .environmentObject(store)
+        }
     }
+}
+
+/// Bounding box and surface breakdown of a LiDAR mesh scan.
+struct MeshSummaryView: View {
+    let measurements: MeshMeasurements
+    let units: UnitSystem
+
+    var body: some View {
+        let m = measurements
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                StatTile(value: UnitFormatter.length(m.width, units), label: "Width", systemImage: "arrow.left.and.right")
+                StatTile(value: UnitFormatter.length(m.depth, units), label: "Depth", systemImage: "arrow.up.left.and.arrow.down.right")
+                StatTile(value: UnitFormatter.length(m.height, units), label: "Height", systemImage: "arrow.up.and.down")
+            }
+            .accessibilityIdentifier("meshDimensions")
+            Text("Bounding box W × D × H: \(m.dimensionsText(units)) · \(m.triangleCount.formatted()) triangles · \(UnitFormatter.area(m.surfaceArea, units)) scanned surface")
+                .font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            let rows = MeshClass.exportOrder.filter { m.triangles(of: $0) > 0 }
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], alignment: .leading, spacing: 6) {
+                ForEach(rows, id: \.self) { cls in
+                    HStack(spacing: 6) {
+                        let c = cls.color
+                        RoundedRectangle(cornerRadius: 3).fill(Color(red: c.r, green: c.g, blue: c.b))
+                            .frame(width: 14, height: 14)
+                            .overlay(RoundedRectangle(cornerRadius: 3).stroke(Theme.hairline, lineWidth: 0.5))
+                        Text(cls.name).font(.caption.weight(.semibold))
+                        Spacer(minLength: 2)
+                        Text(UnitFormatter.area(m.area(of: cls), units)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .card()
+    }
+}
+
+/// "Retry 3D build" for object captures whose on-device reconstruction failed. Re-runs the full
+/// retry chain over the saved photos (device only).
+struct RetryReconstructionSection: View {
+    let jobID: UUID
+    let capture: Capture
+
+    @EnvironmentObject private var store: JobStore
+    #if os(iOS) && !targetEnvironment(simulator) && !targetEnvironment(macCatalyst)
+    @StateObject private var reconstructor = ObjectReconstructor()
+    #endif
+
+    var body: some View {
+        #if os(iOS) && !targetEnvironment(simulator) && !targetEnvironment(macCatalyst)
+        if reconstructor.isRunning {
+            ReconstructionProgressCard(reconstructor: reconstructor, photos: capture.imageCount)
+        } else {
+            Button {
+                Task { await retry() }
+            } label: {
+                Label("Retry 3D build", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(BigButtonStyle())
+            .accessibilityIdentifier("retryBuildButton")
+            if let attempts = capture.reconstructionAttempts, attempts > 0 {
+                Text("\(attempts) attempt\(attempts == 1 ? "" : "s") so far. Each retry runs \(reconstructor.attemptCount) settings in turn.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        #else
+        Label("Retry 3D build runs on a LiDAR iPhone or iPad.", systemImage: "info.circle")
+            .font(.footnote).foregroundStyle(.secondary)
+        #endif
+    }
+
+    #if os(iOS) && !targetEnvironment(simulator) && !targetEnvironment(macCatalyst)
+    private func retry() async {
+        guard var current = store.capture(job: jobID, capture: capture.id) else { return }
+        current.status = .processing
+        current.statusMessage = nil
+        store.updateCapture(current, in: jobID)
+        let outcome = await reconstructor.run(captureDirectory: store.captureDirectory(job: jobID, capture: capture.id),
+                                              reason: "Retry 3D build (3D tab)")
+        current = store.capture(job: jobID, capture: capture.id) ?? current
+        current.reconstructionAttempts = (current.reconstructionAttempts ?? 0) + outcome.attempts
+        current.status = outcome.succeeded ? .complete : .imagesOnly
+        current.statusMessage = outcome.succeeded ? nil : outcome.message
+        store.updateCapture(current, in: jobID)
+        store.touchExports()
+    }
+    #endif
 }
 
 /// Interactive SceneKit preview with orbit camera.
 struct SceneModelView: UIViewRepresentable {
     let url: URL
+    /// Bumped when files are regenerated; the scene reloads when it changes.
+    var revision: Int = 0
 
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView()
@@ -87,7 +220,19 @@ struct SceneModelView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ view: SCNView, context: Context) {}
+    func updateUIView(_ view: SCNView, context: Context) {
+        if context.coordinator.revision != revision {
+            context.coordinator.revision = revision
+            load(into: view)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(revision: revision) }
+
+    final class Coordinator {
+        var revision: Int
+        init(revision: Int) { self.revision = revision }
+    }
 
     private func load(into view: SCNView) {
         guard let scene = try? SCNScene(url: url, options: [.checkConsistency: false]) else { return }

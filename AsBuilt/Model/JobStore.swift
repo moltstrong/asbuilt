@@ -162,8 +162,10 @@ final class JobStore: ObservableObject {
         let dir = captureDirectory(job: jobID, capture: captureID)
         let urls = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey],
                                                 options: [.skipsHiddenFiles])) ?? []
-        let order = [CaptureFile.roomUSDZ, CaptureFile.modelUSDZ, CaptureFile.dxf, CaptureFile.pdf, CaptureFile.csv,
-                     CaptureFile.svg, CaptureFile.roomJSON, CaptureFile.planJSON, CaptureFile.images, CaptureFile.checkpoint]
+        let order = [CaptureFile.roomUSDZ, CaptureFile.modelUSDZ, CaptureFile.meshOBJ, CaptureFile.meshMTL, CaptureFile.meshPLY,
+                     CaptureFile.meshCSV, CaptureFile.dxf, CaptureFile.pdf, CaptureFile.csv, CaptureFile.svg,
+                     CaptureFile.reconstructionLog, CaptureFile.roomJSON, CaptureFile.planJSON, CaptureFile.scanInfo,
+                     CaptureFile.images, CaptureFile.checkpoint]
         return urls
             .filter { !$0.lastPathComponent.hasPrefix(".") }
             .sorted { a, b in
@@ -180,6 +182,33 @@ final class JobStore: ObservableObject {
             if fm.fileExists(atPath: url.path) { return url }
         }
         return nil
+    }
+
+    /// Lets views that cache file lists (Files tab ZIP) refresh after files changed on disk.
+    func touchExports() {
+        exportsRevision += 1
+    }
+
+    /// Measurements of a LiDAR mesh capture: from job.json, else from scan-info.json.
+    func meshMeasurements(job jobID: UUID, capture captureID: UUID) -> MeshMeasurements? {
+        if let m = capture(job: jobID, capture: captureID)?.measurements { return m }
+        let url = captureDirectory(job: jobID, capture: captureID).appendingPathComponent(CaptureFile.scanInfo)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(MeshMeasurements.self, from: data)
+    }
+
+    /// Rewrites measurements.csv of a LiDAR mesh capture in the current units.
+    func regenerateMeshCSV(job jobID: UUID, capture captureID: UUID) {
+        guard let capture = capture(job: jobID, capture: captureID),
+              let m = meshMeasurements(job: jobID, capture: captureID) else { return }
+        let url = captureDirectory(job: jobID, capture: captureID).appendingPathComponent(CaptureFile.meshCSV)
+        let text = MeshMeasurementsCSV.write(m, title: capture.title, units: Preferences.units)
+        do {
+            try Data(text.utf8).write(to: url, options: .atomic)
+            exportsRevision += 1
+        } catch {
+            lastError = "Could not update measurements.csv: \(error.localizedDescription)"
+        }
     }
 
     /// Regenerates DXF/SVG/PDF/CSV for a room capture with the current unit and estimating settings.
@@ -208,6 +237,7 @@ final class JobStore: ObservableObject {
         case cad = "CAD exports"
         case model = "3D model"
         case pdf = "PDF"
+        case mesh = "LiDAR mesh"
     }
 
     private var skippedDemoStages: Set<DemoStage> {
@@ -229,10 +259,18 @@ final class JobStore: ObservableObject {
             demoStatus = .idle
         }
         let samples = [(SampleData.demoCaptureID, SampleData.bedroom()), (SampleData.demoKitchenCaptureID, SampleData.kitchen())]
-        if job(id) != nil, samples.allSatisfy({ plan(job: id, capture: $0.0) != nil }) {
+        let created = ISO8601DateFormatter().date(from: "2026-10-20T15:30:00Z") ?? Date()
+        let meshCapture = Capture(id: SampleData.demoMeshCaptureID, kind: .mesh, origin: .sample, title: "Bedroom 2 LiDAR mesh",
+                                  createdAt: created.addingTimeInterval(3600),
+                                  notes: "Sample LiDAR Mesh scan of Bedroom 2 (generated): walls, floor, ceiling, door, windows, furniture and a water heater.")
+        if var existing = job(id), samples.allSatisfy({ plan(job: id, capture: $0.0) != nil }) {
+            // Demo jobs created by builds <= 4 have no LiDAR mesh sample yet: add it (JSON only).
+            if !existing.captures.contains(where: { $0.id == SampleData.demoMeshCaptureID }) {
+                existing.captures.append(meshCapture)
+                save(existing, touch: false)
+            }
             return
         }
-        let created = ISO8601DateFormatter().date(from: "2026-10-20T15:30:00Z") ?? Date()
         let bedroom = Capture(id: SampleData.demoCaptureID, kind: .room, origin: .sample, title: "Bedroom 2",
                               createdAt: created,
                               notes: "Sample room: 12' x 14', 8' ceiling. Entry door, two windows, closet opening.")
@@ -241,7 +279,7 @@ final class JobStore: ObservableObject {
                               notes: "Sample room: 11' x 13', 9' ceiling. Base cabinets, sink, dishwasher, range, fridge.")
         let job = Job(id: id, name: "Demo: 412 Alder St Remodel", address: "412 Alder St, Portland, OR 97205",
                       client: "Sample Homeowner", notes: "Demo job with sample rooms. Works in the Simulator and on any iPhone.",
-                      createdAt: created, updatedAt: created, isDemo: true, captures: [bedroom, kitchen])
+                      createdAt: created, updatedAt: created, isDemo: true, captures: [bedroom, kitchen, meshCapture])
         save(job, touch: false)
         for (captureID, plan) in samples {
             do {
@@ -266,6 +304,14 @@ final class JobStore: ObservableObject {
         case .cad: names = [CaptureFile.dxf, CaptureFile.svg, CaptureFile.csv]
         case .model: names = [CaptureFile.modelUSDZ]
         case .pdf: names = [CaptureFile.pdf]
+        case .mesh:
+            return job.meshCaptures.filter { capture in
+                guard capture.id == SampleData.demoMeshCaptureID else { return false }
+                let dir = captureDirectory(job: job.id, capture: capture.id)
+                if !Self.isCurrentRoomModel(dir.appendingPathComponent(CaptureFile.modelUSDZ)) { return true }
+                return [CaptureFile.meshOBJ, CaptureFile.meshMTL, CaptureFile.meshCSV, CaptureFile.scanInfo]
+                    .contains { !fm.fileExists(atPath: dir.appendingPathComponent($0).path) } || capture.measurements == nil
+            }
         }
         return job.roomCaptures.filter { capture in
             let dir = captureDirectory(job: job.id, capture: capture.id)
@@ -326,8 +372,26 @@ final class JobStore: ObservableObject {
         for stage in stages {
             defaults.set(stage.rawValue, forKey: Self.demoInFlightKey)
             for capture in demoCaptures(missing: stage) {
-                guard let plan = plan(job: job.id, capture: capture.id) else { continue }
                 let dir = captureDirectory(job: job.id, capture: capture.id)
+                if stage == .mesh {
+                    let title = capture.title
+                    do {
+                        let measurements = try await Task.detached(priority: .utility) {
+                            try ExportService.writeDemoMeshScan(to: dir, title: title, units: units)
+                        }.value
+                        if var updated = self.capture(job: job.id, capture: capture.id),
+                           var current = self.job(job.id), let index = current.captures.firstIndex(where: { $0.id == capture.id }) {
+                            updated.measurements = measurements
+                            current.captures[index] = updated
+                            save(current, touch: false)
+                        }
+                    } catch {
+                        failure = "Demo \(stage.rawValue) failed: \(error.localizedDescription)"
+                    }
+                    await Task.yield()
+                    continue
+                }
+                guard let plan = plan(job: job.id, capture: capture.id) else { continue }
                 let context = ExportService.Context(job: job, capture: capture)
                 do {
                     switch stage {
@@ -342,6 +406,8 @@ final class JobStore: ObservableObject {
                     case .pdf:
                         // UIKit drawing: stays on the main actor, but after the first frame.
                         try ExportService.writePDF(plan: plan, to: dir, context: context, units: units, options: options)
+                    case .mesh:
+                        break
                     }
                 } catch {
                     failure = "Demo \(stage.rawValue) failed: \(error.localizedDescription)"

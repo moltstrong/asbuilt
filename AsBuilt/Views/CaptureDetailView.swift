@@ -92,6 +92,7 @@ struct CaptureDetailView: View {
         }
         .onChange(of: unitsRaw) { _, _ in
             if capture.kind == .room { store.regenerateExports(job: jobID, capture: captureID) }
+            if capture.kind == .mesh { store.regenerateMeshCSV(job: jobID, capture: captureID) }
         }
     }
 }
