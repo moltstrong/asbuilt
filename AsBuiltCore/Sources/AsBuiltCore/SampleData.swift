@@ -4,6 +4,8 @@ import Foundation
 public enum SampleData {
     public static let demoJobID = UUID(uuidString: "6A3B1C2D-0000-4000-8000-00000000A001")!
     public static let demoCaptureID = UUID(uuidString: "6A3B1C2D-0000-4000-8000-00000000B001")!
+    /// Demo LiDAR Mesh scan (procedural, see `DemoMeshScan`).
+    public static let demoMeshCaptureID = UUID(uuidString: "6A3B1C2D-0000-4000-8000-00000000B003")!
 
     static let w1 = UUID(uuidString: "6A3B1C2D-0000-4000-8000-0000000000E1")!
     static let w2 = UUID(uuidString: "6A3B1C2D-0000-4000-8000-0000000000E2")!
