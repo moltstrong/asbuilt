@@ -284,6 +284,16 @@ public struct CoverageSnapshot: Sendable, Hashable {
     public var bandsComplete: [Bool]
     public var fraction: Float
 
+    public init(fill: [[Float]], currentBand: CoachBand?, currentSector: Int?, targetBand: CoachBand?,
+                bandsComplete: [Bool], fraction: Float) {
+        self.fill = fill
+        self.currentBand = currentBand
+        self.currentSector = currentSector
+        self.targetBand = targetBand
+        self.bandsComplete = bandsComplete
+        self.fraction = fraction
+    }
+
     public static let empty = CoverageSnapshot(fill: Array(repeating: Array(repeating: 0, count: 12), count: 3),
                                                currentBand: nil, currentSector: nil, targetBand: nil,
                                                bandsComplete: [false, false, false], fraction: 0)
@@ -331,6 +341,35 @@ public struct CoachOutput: Sendable, Hashable {
     public var isReady: Bool
     /// Coverage reached the finish threshold: offer "Finish".
     public var suggestFinish: Bool
+}
+
+extension CoachReport {
+    /// coach-report.txt: grade, the one fix, and the technique breakdown.
+    public func text(mode: CoachMode, title: String, thresholds: CoachThresholds) -> String {
+        func pct(_ f: Float) -> String { "\(Int((f * 100).rounded()))%" }
+        var lines = [
+            "AsBuilt Capture Coach report",
+            "Scan: \(title)",
+            "Mode: \(mode.rawValue)",
+            "Grade: \(grade.rawValue)  (score \(String(format: "%.2f", score)))",
+            "Fix next time: \(fix ?? "nothing, clean scan")",
+            "",
+            "Coverage: \(pct(coverageFraction)) of 36 cells (12 directions x 3 heights)",
+            "Good technique: \(pct(goodFraction)) of \(Int(seconds.rounded())) s tracked",
+            "Too fast: \(pct(tooFastFraction))",
+            "Too dark: \(pct(tooDarkFraction))",
+            "Out of range: \(pct(distanceFraction))",
+            "Shiny/plain surface: \(pct(lowTextureFraction))",
+            "",
+        ]
+        if thresholds.maxDistance < 100 {
+            lines.append(String(format: "Sweet spot: %.2f-%.2f m", thresholds.minDistance, thresholds.maxDistance))
+        }
+        if thresholds.maxLinearSpeed < 100 {
+            lines.append(String(format: "Speed limit: %.2f m/s, %.0f deg/s", thresholds.maxLinearSpeed, thresholds.maxAngularSpeed))
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
 }
 
 /// Final grade card.
@@ -473,6 +512,13 @@ public struct CaptureCoach: Sendable {
         currentBand = band
         targetBand = firstIncompleteBand(after: band)
         return targetBand
+    }
+
+    /// Object Capture: the user started the next pass (Another pass / Flip) at `band`; clears the
+    /// "Now lower/higher" cue until that pass completes.
+    public mutating func beginPass(_ band: CoachBand) {
+        currentBand = band
+        targetBand = nil
     }
 
     /// Speed from two poses `dt` seconds apart: (m/s, deg/s).

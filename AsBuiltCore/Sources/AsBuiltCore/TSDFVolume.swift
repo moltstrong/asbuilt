@@ -130,6 +130,16 @@ public final class TSDFVolume: @unchecked Sendable {
         public var memoryBytes: Int
         public var memoryFraction: Double
         public var isFull: Bool
+
+        public init(framesIntegrated: Int = 0, blockCount: Int = 0, voxelCount: Int = 0, memoryBytes: Int = 0,
+                    memoryFraction: Double = 0, isFull: Bool = false) {
+            self.framesIntegrated = framesIntegrated
+            self.blockCount = blockCount
+            self.voxelCount = voxelCount
+            self.memoryBytes = memoryBytes
+            self.memoryFraction = memoryFraction
+            self.isFull = isFull
+        }
     }
 
     public struct FrameResult: Sendable, Hashable {
@@ -204,11 +214,13 @@ public final class TSDFVolume: @unchecked Sendable {
 
     /// Index of the block at `c`, or -1.
     @inline(__always)
+    @_optimize(speed)
     func blockIndex(_ c: SIMD3<Int32>) -> Int {
         table.find(Self.blockKey(c))
     }
 
     /// Finds or allocates the block at `c`. Returns -1 when the memory cap is reached.
+    @_optimize(speed)
     private func allocateBlock(_ c: SIMD3<Int32>) -> Int {
         let key = Self.blockKey(c)
         let found = table.find(key)
@@ -246,6 +258,8 @@ public final class TSDFVolume: @unchecked Sendable {
     ///
     /// `bounds` (world AABB) limits allocation, e.g. to the object being scanned. Malformed input
     /// (short buffers, NaN poses) is ignored, never trapped on.
+    // `@_optimize(speed)`: the hot loops stay fast in Debug / Simulator builds too (demo job, tests).
+    @_optimize(speed)
     @discardableResult
     public func integrate(_ frame: DepthFrame, bounds: (min: SIMD3<Float>, max: SIMD3<Float>)? = nil) -> FrameResult {
         let w = frame.width, h = frame.height
@@ -470,6 +484,7 @@ public final class TSDFVolume: @unchecked Sendable {
     }
 
     /// Central-difference TSDF gradient at a voxel (one-sided where a neighbor is unobserved).
+    @_optimize(speed)
     private func gradient(_ g: SIMD3<Int32>, center: Float) -> SIMD3<Float> {
         var out = SIMD3<Float>(0, 0, 0)
         let axes: [SIMD3<Int32>] = [SIMD3(1, 0, 0), SIMD3(0, 1, 0), SIMD3(0, 0, 1)]
@@ -528,6 +543,7 @@ public final class TSDFVolume: @unchecked Sendable {
     ///
     /// - `minWeight`: corners observed fewer times are treated as unknown (no faces).
     /// - `progress` gets 0...1.
+    @_optimize(speed)
     public func extractMesh(minWeight: UInt8 = 1, progress: ((Double) -> Void)? = nil) -> FusedMesh {
         let dim = Self.blockDim
         let s = configuration.voxelSize
@@ -715,6 +731,7 @@ struct BlockHashTable {
     }
 
     @inline(__always)
+    @_optimize(speed)
     func find(_ key: UInt64) -> Int {
         var i = slot(key)
         while true {
@@ -725,6 +742,7 @@ struct BlockHashTable {
         }
     }
 
+    @_optimize(speed)
     mutating func insert(_ key: UInt64, value: Int32) {
         if (count + 1) * 2 > keys.count { grow() }
         var i = slot(key)

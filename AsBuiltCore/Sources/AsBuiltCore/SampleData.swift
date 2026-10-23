@@ -6,6 +6,8 @@ public enum SampleData {
     public static let demoCaptureID = UUID(uuidString: "6A3B1C2D-0000-4000-8000-00000000B001")!
     /// Demo LiDAR Mesh scan (procedural, see `DemoMeshScan`).
     public static let demoMeshCaptureID = UUID(uuidString: "6A3B1C2D-0000-4000-8000-00000000B003")!
+    /// Demo Detail scan (TSDF fusion of synthetic depth maps, see `DemoDetailScan`).
+    public static let demoDetailCaptureID = UUID(uuidString: "6A3B1C2D-0000-4000-8000-00000000B004")!
 
     static let w1 = UUID(uuidString: "6A3B1C2D-0000-4000-8000-0000000000E1")!
     static let w2 = UUID(uuidString: "6A3B1C2D-0000-4000-8000-0000000000E2")!
@@ -86,5 +88,30 @@ public enum SampleData {
         ]
         return FloorPlan(name: "Kitchen", walls: walls, openings: openings, fixtures: fixtures,
                          floorPolygon: nil, ceilingHeight: h)
+    }
+
+    /// Tape calibration of the demo job: the door opening read 36-1/8" and the tape said 36".
+    public static let demoMeasureScale = 36.0 / 36.125
+
+    /// Demo Measure-tool measurements (one tape-calibrated), so the Measurements list shows real data.
+    public static func demoMeasurements() -> [PrecisionMeasurement] {
+        let inch: Float = 0.0254
+        let date = ISO8601DateFormatter().date(from: "2026-10-20T17:10:00Z") ?? Date(timeIntervalSince1970: 0)
+        func id(_ n: Int) -> UUID { UUID(uuidString: String(format: "6A3B1C2D-0000-4000-8000-0000000C%04d", n))! }
+        let raw = 36.125 * inch
+        return [
+            PrecisionMeasurement(id: id(1), label: "Door rough opening width", createdAt: date,
+                                 start: SIMD3(0, 1.0, -1.5), end: SIMD3(raw, 1.0, -1.5),
+                                 uncertaintyMeters: 0.0021, samples: 24, method: "lidarDepth", tapeMeters: Double(36 * inch)),
+            PrecisionMeasurement(id: id(2), label: "Window sill height", createdAt: date.addingTimeInterval(60),
+                                 start: SIMD3(1.2, 0, -2.0), end: SIMD3(1.2, 30.25 * inch, -2.0),
+                                 uncertaintyMeters: 0.0018, samples: 26, method: "lidarDepth"),
+            PrecisionMeasurement(id: id(3), label: "Valve to box center", createdAt: date.addingTimeInterval(120),
+                                 start: SIMD3(-0.10, 0.17, -0.05), end: SIMD3(0.12, 0.10, -0.065),
+                                 uncertaintyMeters: 0.0012, samples: 22, method: "lidarDepth"),
+            PrecisionMeasurement(id: id(4), label: "Ceiling height", createdAt: date.addingTimeInterval(180),
+                                 start: SIMD3(2.0, 0, -1.0), end: SIMD3(2.0, 96.5 * inch, -1.0),
+                                 uncertaintyMeters: 0.0042, samples: 18, method: "raycast"),
+        ]
     }
 }

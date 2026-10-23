@@ -57,12 +57,25 @@ public struct AnalyticScene: Sendable {
         }
     }
 
+    /// Center and radius (w) of a sphere enclosing the shape; radius 0 = unbounded (plane).
+    static func boundingSphere(_ shape: Shape) -> SIMD4<Float> {
+        switch shape {
+        case let .sphere(c, r): return SIMD4(c, r)
+        case let .box(c, e): return SIMD4(c, simd_length(e) * 1.001)
+        case let .cylinder(a, b, r):
+            let half = simd_length(b - a) / 2
+            return SIMD4((a + b) / 2, (half * half + r * r).squareRoot() * 1.001)
+        case .plane: return SIMD4(0, 0, 0, 0)
+        }
+    }
+
     /// Signed distance to the union of all parts.
     public func distance(_ p: SIMD3<Float>) -> Float {
         parts.reduce(Float.greatestFiniteMagnitude) { min($0, Self.distance($1.shape, p)) }
     }
 
     /// Nearest ray parameter t > tMin where the ray o + t d (d unit) enters `shape`, or infinity.
+    @_optimize(speed)
     static func intersect(_ shape: Shape, ox: Float, oy: Float, oz: Float, dx: Float, dy: Float, dz: Float, tMin: Float) -> Float {
         switch shape {
         case let .sphere(c, r):
@@ -77,14 +90,18 @@ public struct AnalyticScene: Sendable {
             let t1 = -b + sq
             return t1 > tMin ? t1 : .infinity
         case let .box(c, e):
+            // Slab test without temporaries (fast in unoptimized builds).
             var tNear = -Float.greatestFiniteMagnitude, tFar = Float.greatestFiniteMagnitude
-            let o = [ox - c.x, oy - c.y, oz - c.z], d = [dx, dy, dz], ext = [e.x, e.y, e.z]
+            let o0 = ox - c.x, o1 = oy - c.y, o2 = oz - c.z
             for k in 0..<3 {
-                if abs(d[k]) < 1e-12 {
-                    if abs(o[k]) > ext[k] { return .infinity }
+                let o = k == 0 ? o0 : (k == 1 ? o1 : o2)
+                let d = k == 0 ? dx : (k == 1 ? dy : dz)
+                let ext = k == 0 ? e.x : (k == 1 ? e.y : e.z)
+                if abs(d) < 1e-12 {
+                    if abs(o) > ext { return .infinity }
                     continue
                 }
-                var ta = (-ext[k] - o[k]) / d[k], tb = (ext[k] - o[k]) / d[k]
+                var ta = (-ext - o) / d, tb = (ext - o) / d
                 if ta > tb { swap(&ta, &tb) }
                 tNear = max(tNear, ta)
                 tFar = min(tFar, tb)
@@ -110,7 +127,9 @@ public struct AnalyticScene: Sendable {
                 let disc = qb * qb - 4 * qa * qc
                 if disc >= 0 {
                     let sq = disc.squareRoot()
-                    for t in [(-qb - sq) / (2 * qa), (-qb + sq) / (2 * qa)] where t > tMin && t < best {
+                    for root in 0..<2 {
+                        let t = root == 0 ? (-qb - sq) / (2 * qa) : (-qb + sq) / (2 * qa)
+                        guard t > tMin && t < best else { continue }
                         let s = ld + t * dd
                         if s >= 0 && s <= height { best = t }
                     }
@@ -118,7 +137,8 @@ public struct AnalyticScene: Sendable {
             }
             // Caps.
             if abs(dd) > 1e-12 {
-                for capS in [Float(0), height] {
+                for cap in 0..<2 {
+                    let capS: Float = cap == 0 ? 0 : height
                     let t = (capS - ld) / dd
                     if t > tMin && t < best {
                         let hx = qx + px * t, hy = qy + py * t, hz = qz + pz * t
@@ -138,6 +158,7 @@ public struct AnalyticScene: Sendable {
     /// Renders a depth map (meters along the optical axis, 0 = miss) and optionally an RGB image of the
     /// same size, from `cameraToWorld` with intrinsics `K`. `noise` adds deterministic Gaussian depth
     /// noise with that standard deviation (meters), seeded by `seed`.
+    @_optimize(speed)
     public func render(intrinsics K: PinholeIntrinsics, cameraToWorld T: simd_float4x4, maxDistance: Float = 4,
                        noise: Float = 0, seed: UInt64 = 1, withColor: Bool = false) -> (depth: [Float], rgb: [UInt8]) {
         let w = K.width, h = K.height
@@ -148,6 +169,9 @@ public struct AnalyticScene: Sendable {
         let r20 = T.columns.2.x, r21 = T.columns.2.y, r22 = T.columns.2.z
         let ox = T.columns.3.x, oy = T.columns.3.y, oz = T.columns.3.z
         let shapes = parts.map(\.shape)
+        // Bounding spheres: most rays miss most parts, so skip the exact test for those.
+        let bounds = shapes.map(Self.boundingSphere)
+        let n = shapes.count
         var rng = SplitMix64(seed: seed)
         for j in 0..<h {
             for i in 0..<w {
@@ -159,12 +183,25 @@ public struct AnalyticScene: Sendable {
                 let dz = (r02 * xn + r12 * yn - r22) / len
                 var best = maxDistance
                 var hit = -1
-                for (k, shape) in shapes.enumerated() {
-                    let t = Self.intersect(shape, ox: ox, oy: oy, oz: oz, dx: dx, dy: dy, dz: dz, tMin: 0.01)
+                var k = 0
+                while k < n {
+                    let b = bounds[k]
+                    if b.w > 0 {
+                        // Ray-sphere reject: closest approach farther than the radius, or behind / beyond best.
+                        let lx = b.x - ox, ly = b.y - oy, lz = b.z - oz
+                        let along = lx * dx + ly * dy + lz * dz
+                        let d2 = lx * lx + ly * ly + lz * lz - along * along
+                        if d2 > b.w * b.w || along + b.w < 0 || along - b.w > best {
+                            k += 1
+                            continue
+                        }
+                    }
+                    let t = Self.intersect(shapes[k], ox: ox, oy: oy, oz: oz, dx: dx, dy: dy, dz: dz, tMin: 0.01)
                     if t < best {
                         best = t
                         hit = k
                     }
+                    k += 1
                 }
                 guard hit >= 0 else { continue }
                 var z = best / len // depth along the optical axis
