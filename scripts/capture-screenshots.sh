@@ -36,6 +36,9 @@ shoot 06-plan-kitchen -AsBuiltScreen kitchen
 SHOT_DELAY=8 shoot 07-3d-model -AsBuiltScreen model
 shoot 08-files-export -AsBuiltScreen files
 shoot 09-capabilities -AsBuiltScreen capabilities
+SHOT_DELAY=8 shoot 10-mesh-3d -AsBuiltScreen mesh
+shoot 11-mesh-files -AsBuiltScreen mesh-files
+SHOT_DELAY=10 shoot 12-mesh-quicklook -AsBuiltScreen mesh-quicklook
 
 # Copy the files the app generated for the demo job, as proof that exports work in the Simulator.
 DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data)

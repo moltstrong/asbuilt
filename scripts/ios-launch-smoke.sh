@@ -10,6 +10,8 @@ APP="$1"
 UDID="$2"
 OUT="$3"
 BUNDLE_ID="com.moltstrong.asbuilt"
+ROOM_CAPTURE="6A3B1C2D-0000-4000-8000-00000000B001"   # SampleData.demoCaptureID
+MESH_CAPTURE="6A3B1C2D-0000-4000-8000-00000000B003"   # SampleData.demoMeshCaptureID
 WAIT="${SMOKE_WAIT:-15}"
 DIAG="$HOME/Library/Logs/DiagnosticReports"
 mkdir -p "$OUT" "$DIAG"
@@ -126,11 +128,23 @@ run_case 01-first-launch
 run_case 02-relaunch
 # 3) The 3D model screen (SceneKit loads model.usdz).
 run_case 03-model -AsBuiltScreen model
+# 4) The demo LiDAR Mesh scan: 3D tab (SceneKit loads the classified mesh USDZ) and Files tab.
+run_case 04-mesh-model -AsBuiltScreen mesh
+run_case 05-mesh-files -AsBuiltScreen mesh-files
 
 DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null || true)
 if [[ -n "$DATA" && -d "$DATA/Documents/Jobs" ]]; then
   find "$DATA/Documents/Jobs" -type f -exec ls -la {} \; | sed "s|$DATA/||"
-  find "$DATA/Documents/Jobs" -name model.usdz -exec cp {} "$OUT/" \; -quit || true
+  find "$DATA/Documents/Jobs" -path "*$ROOM_CAPTURE*" -name model.usdz -exec cp {} "$OUT/model.usdz" \; -quit || true
+  MESH_DIR=$(find "$DATA/Documents/Jobs" -type d -name "$MESH_CAPTURE" | head -1)
+  if [[ -n "$MESH_DIR" ]]; then
+    cp "$MESH_DIR/model.usdz" "$OUT/mesh-model.usdz" || true
+    mkdir -p "$OUT/mesh-exports"
+    cp "$MESH_DIR"/* "$OUT/mesh-exports/" 2>/dev/null || true
+  else
+    echo "::error::demo LiDAR mesh capture folder not found"
+    FAILED=1
+  fi
 fi
 
 rm -f "$MARKER"
