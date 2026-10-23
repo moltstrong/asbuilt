@@ -37,12 +37,24 @@ struct ModelTabView: View {
                               systemImage: "info.circle")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
+                } else if capture.origin == .sample && store.demoStatus == .preparing {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Preparing demo…").font(.headline)
+                        Text("Building the 3D model for this sample room.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 200)
+                    .card()
                 } else {
                     VStack(spacing: 12) {
                         Image(systemName: "cube.transparent").font(.system(size: 48)).foregroundStyle(.secondary)
                         Text(capture.kind == .object ? "No 3D model yet" : "No USDZ model for this room").font(.headline)
                         if let message = capture.statusMessage {
                             Text(message).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                        }
+                        if capture.origin == .sample, let notice = store.demoNotice {
+                            Text(notice).font(.footnote).multilineTextAlignment(.center).foregroundStyle(.secondary)
                         }
                         if capture.kind == .object {
                             Text("The photos are in the Files tab. On a Mac, drop the Images folder into Reality Composer Pro (or run PhotogrammetrySession at .full / .raw detail) for a higher-detail model, then import the USDZ back here.")
@@ -195,7 +207,7 @@ struct FilesTabView: View {
             .padding(16)
             .id(refresh)
         }
-        .task(id: refresh) { buildZip(files: files, job: job) }
+        .task(id: "\(refresh.uuidString)-\(store.exportsRevision)") { buildZip(files: files, job: job) }
         .fullScreenCover(item: $previewURL) { url in
             QuickLookPreview(url: url).ignoresSafeArea()
         }

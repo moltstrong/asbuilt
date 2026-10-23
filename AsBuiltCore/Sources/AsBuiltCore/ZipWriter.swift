@@ -17,8 +17,19 @@ public struct ZipWriter {
     }
 
     public private(set) var entries: [Entry] = []
+    /// When > 1, every entry's file data starts at a multiple of this many bytes, padded with an
+    /// extra field (id 0x1986) in the local header, as `usdzip` does. USDZ requires 64.
+    public let dataAlignment: Int
+    /// Sets general-purpose bit 11 (names are UTF-8).
+    public let utf8Names: Bool
 
-    public init() {}
+    /// Extra-field header id used for alignment padding (same as Pixar's usdzip).
+    public static let paddingExtraFieldID: UInt16 = 0x1986
+
+    public init(dataAlignment: Int = 1, utf8Names: Bool = true) {
+        self.dataAlignment = max(1, dataAlignment)
+        self.utf8Names = utf8Names
+    }
 
     public mutating func add(path: String, data: Data, modified: Date = Date()) {
         entries.append(Entry(path: path, data: data, modified: modified))
@@ -33,7 +44,8 @@ public struct ZipWriter {
             let size = UInt32(entry.data.count)
             let (time, date) = Self.dosDateTime(entry.modified)
             let offset = UInt32(out.count)
-            let utf8Flag: UInt16 = 1 << 11
+            let utf8Flag: UInt16 = utf8Names ? 1 << 11 : 0
+            let extra = Self.paddingExtraField(headerOffset: out.count, nameLength: name.count, alignment: dataAlignment)
 
             // Local file header.
             out.appendLE(UInt32(0x04034b50))
@@ -46,8 +58,9 @@ public struct ZipWriter {
             out.appendLE(size)
             out.appendLE(size)
             out.appendLE(UInt16(name.count))
-            out.appendLE(UInt16(0))
+            out.appendLE(UInt16(extra.count))
             out.append(name)
+            out.append(extra)
             out.append(entry.data)
 
             // Central directory header.
@@ -82,6 +95,21 @@ public struct ZipWriter {
         out.appendLE(centralOffset)
         out.appendLE(UInt16(0))
         return out
+    }
+
+    /// Local-header extra field that pushes the file data to the next `alignment` boundary
+    /// (empty when already aligned). Layout: id 0x1986, UInt16 size, `size` zero bytes.
+    static func paddingExtraField(headerOffset: Int, nameLength: Int, alignment: Int) -> Data {
+        guard alignment > 1 else { return Data() }
+        let dataStart = headerOffset + 30 + nameLength
+        var pad = (alignment - dataStart % alignment) % alignment
+        guard pad > 0 else { return Data() }
+        while pad < 4 { pad += alignment } // the extra-field header itself takes 4 bytes
+        var extra = Data()
+        extra.appendLE(paddingExtraFieldID)
+        extra.appendLE(UInt16(pad - 4))
+        extra.append(Data(count: pad - 4))
+        return extra
     }
 
     static func dosDateTime(_ date: Date) -> (time: UInt16, date: UInt16) {

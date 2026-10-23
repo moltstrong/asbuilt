@@ -9,8 +9,24 @@ final class JobStore: ObservableObject {
     @Published private(set) var jobs: [Job] = []
     @Published private(set) var lastError: String?
 
+    /// Progress of the demo job's export generation (runs after the first frame, never in App.init).
+    enum DemoStatus: Equatable {
+        case idle
+        case preparing
+        case ready
+        case failed(String)
+    }
+
+    @Published private(set) var demoStatus: DemoStatus = .idle
+    /// Non-fatal message shown when a demo generation stage was skipped (e.g. it crashed last launch).
+    @Published private(set) var demoNotice: String?
+    /// Bumped whenever files are (re)generated, so views that cache file lists can refresh.
+    @Published private(set) var exportsRevision = 0
+
     let rootURL: URL
+    let defaults: UserDefaults
     private var planCache: [UUID: FloorPlan] = [:]
+    private var checkedForCrashedGeneration = false
     private let fm = FileManager.default
 
     private static let encoder: JSONEncoder = {
@@ -26,9 +42,10 @@ final class JobStore: ObservableObject {
         return d
     }()
 
-    init(rootURL: URL? = nil) {
+    init(rootURL: URL? = nil, defaults: UserDefaults = .standard) {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         self.rootURL = rootURL ?? documents.appendingPathComponent("Jobs", isDirectory: true)
+        self.defaults = defaults
         try? fm.createDirectory(at: self.rootURL, withIntermediateDirectories: true)
         load()
     }
@@ -180,15 +197,39 @@ final class JobStore: ObservableObject {
 
     // MARK: Demo job
 
-    /// Creates the bundled demo job (two rooms built from AsBuiltCore sample data, no LiDAR needed).
+    /// UserDefaults key holding the demo generation stage that is currently running. It is set right
+    /// before each stage and cleared when generation finishes, so finding it at launch means the
+    /// previous attempt died (crashed or was killed) in that stage.
+    static let demoInFlightKey = "demoGenerationInFlight"
+    /// Stages that are skipped from now on because they did not finish before (cleared by Reset demo).
+    static let demoSkippedStagesKey = "demoGenerationSkippedStages"
+
+    enum DemoStage: String, CaseIterable {
+        case cad = "CAD exports"
+        case model = "3D model"
+        case pdf = "PDF"
+    }
+
+    private var skippedDemoStages: Set<DemoStage> {
+        get { Set((defaults.stringArray(forKey: Self.demoSkippedStagesKey) ?? []).compactMap(DemoStage.init(rawValue:))) }
+        set { defaults.set(newValue.map(\.rawValue).sorted(), forKey: Self.demoSkippedStagesKey) }
+    }
+
+    /// Fast, launch-safe part of the demo: writes job.json and the two plan.json files only.
+    /// No exports, no SceneKit, no drawing. Exports are generated later by `prepareDemoExports()`.
     func ensureDemoJob(reset: Bool = false) {
         let id = SampleData.demoJobID
         if reset {
             try? fm.removeItem(at: jobDirectory(id))
             jobs.removeAll { $0.id == id }
             planCache = [:]
+            // An explicit reset is the user's "try again": re-enable every stage.
+            defaults.removeObject(forKey: Self.demoSkippedStagesKey)
+            demoNotice = nil
+            demoStatus = .idle
         }
-        if let existing = job(id), existing.captures.allSatisfy({ modelURL(job: id, capture: $0.id) != nil }) {
+        let samples = [(SampleData.demoCaptureID, SampleData.bedroom()), (SampleData.demoKitchenCaptureID, SampleData.kitchen())]
+        if job(id) != nil, samples.allSatisfy({ plan(job: id, capture: $0.0) != nil }) {
             return
         }
         let created = ISO8601DateFormatter().date(from: "2026-10-20T15:30:00Z") ?? Date()
@@ -202,16 +243,119 @@ final class JobStore: ObservableObject {
                       client: "Sample Homeowner", notes: "Demo job with sample rooms. Works in the Simulator and on any iPhone.",
                       createdAt: created, updatedAt: created, isDemo: true, captures: [bedroom, kitchen])
         save(job, touch: false)
-        for (capture, plan) in [(bedroom, SampleData.bedroom()), (kitchen, SampleData.kitchen())] {
+        for (captureID, plan) in samples {
             do {
-                try setPlan(plan, job: id, capture: capture.id)
-                let dir = captureDirectory(job: id, capture: capture.id)
-                try ExportService.writePlanExports(plan: plan, to: dir, context: .init(job: job, capture: capture),
-                                                   units: Preferences.units, options: Preferences.takeoffOptions)
-                try SceneModelBuilder.writeUSDZ(plan: plan, to: dir.appendingPathComponent(CaptureFile.modelUSDZ))
+                try setPlan(plan, job: id, capture: captureID)
             } catch {
-                lastError = "Demo export failed: \(error.localizedDescription)"
+                lastError = "Demo setup failed: \(error.localizedDescription)"
             }
+        }
+    }
+
+    /// Reset demo (job menu): rewrite the demo job and regenerate all of its files.
+    func resetDemo() async {
+        ensureDemoJob(reset: true)
+        await prepareDemoExports()
+    }
+
+    /// Demo captures whose files for `stage` are missing.
+    private func demoCaptures(missing stage: DemoStage) -> [Capture] {
+        guard let job = job(SampleData.demoJobID) else { return [] }
+        let names: [String]
+        switch stage {
+        case .cad: names = [CaptureFile.dxf, CaptureFile.svg, CaptureFile.csv]
+        case .model: names = [CaptureFile.modelUSDZ]
+        case .pdf: names = [CaptureFile.pdf]
+        }
+        return job.roomCaptures.filter { capture in
+            let dir = captureDirectory(job: job.id, capture: capture.id)
+            if stage == .model, !Self.isCurrentRoomModel(dir.appendingPathComponent(CaptureFile.modelUSDZ)) { return true }
+            return names.contains { !fm.fileExists(atPath: dir.appendingPathComponent($0).path) }
+        }
+    }
+
+    /// True when `url` is a USDZ written by AsBuiltCore's packager (first entry `model.usda`, data at
+    /// offset 64). Demo models left by builds <= 3 (SceneKit-written, or truncated by the iOS 27 crash)
+    /// fail this check and get regenerated.
+    static func isCurrentRoomModel(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 64), head.count >= 40 else { return false }
+        let bytes = [UInt8](head)
+        let nameLength = Int(bytes[26]) | Int(bytes[27]) << 8
+        let extraLength = Int(bytes[28]) | Int(bytes[29]) << 8
+        guard bytes[0..<4] == [0x50, 0x4B, 0x03, 0x04], nameLength == 10, (30 + nameLength + extraLength) % 64 == 0 else {
+            return false
+        }
+        return String(decoding: bytes[30..<40], as: UTF8.self) == "model.usda"
+    }
+
+    /// Slow part of the demo: DXF/SVG/CSV, model.usdz and PDF for each sample room. Called from a
+    /// `.task` on the root view, so the first frame is never blocked.
+    ///
+    /// Crash-loop breaker: each stage is recorded in `demoGenerationInFlight` before it runs. If the
+    /// key is still set when this runs for the first time in a process, that stage died last launch;
+    /// it is skipped from now on (until Reset demo) and a non-fatal notice is shown instead.
+    func prepareDemoExports() async {
+        guard demoStatus != .preparing else { return }
+        if !checkedForCrashedGeneration {
+            checkedForCrashedGeneration = true
+            if let raw = defaults.string(forKey: Self.demoInFlightKey) {
+                defaults.removeObject(forKey: Self.demoInFlightKey)
+                let stage = DemoStage(rawValue: raw) ?? .model
+                skippedDemoStages.insert(stage)
+            }
+        }
+        let skipped = skippedDemoStages
+        if !skipped.isEmpty {
+            let list = skipped.map(\.rawValue).sorted().joined(separator: ", ")
+            demoNotice = "Demo \(list) skipped: it did not finish last time the app ran. Plans and takeoffs still work. Use Reset demo on the demo job to try again."
+        }
+        guard let job = job(SampleData.demoJobID) else { return }
+        let stages = DemoStage.allCases.filter { !skipped.contains($0) && !demoCaptures(missing: $0).isEmpty }
+        guard !stages.isEmpty else {
+            demoStatus = .ready
+            return
+        }
+
+        demoStatus = .preparing
+        await Task.yield() // let the first frame (and the "Preparing demo…" state) render
+        var failure: String?
+        let units = Preferences.units
+        let options = Preferences.takeoffOptions
+        for stage in stages {
+            defaults.set(stage.rawValue, forKey: Self.demoInFlightKey)
+            for capture in demoCaptures(missing: stage) {
+                guard let plan = plan(job: job.id, capture: capture.id) else { continue }
+                let dir = captureDirectory(job: job.id, capture: capture.id)
+                let context = ExportService.Context(job: job, capture: capture)
+                do {
+                    switch stage {
+                    case .cad:
+                        try await Task.detached(priority: .utility) {
+                            _ = try ExportService.writeCADExports(plan: plan, to: dir, context: context, units: units, options: options)
+                        }.value
+                    case .model:
+                        try await Task.detached(priority: .utility) {
+                            _ = try ExportService.writeRoomModel(plan: plan, to: dir)
+                        }.value
+                    case .pdf:
+                        // UIKit drawing: stays on the main actor, but after the first frame.
+                        try ExportService.writePDF(plan: plan, to: dir, context: context, units: units, options: options)
+                    }
+                } catch {
+                    failure = "Demo \(stage.rawValue) failed: \(error.localizedDescription)"
+                }
+                await Task.yield()
+            }
+        }
+        defaults.removeObject(forKey: Self.demoInFlightKey)
+        exportsRevision += 1
+        if let failure {
+            lastError = failure
+            demoStatus = .failed(failure)
+        } else {
+            demoStatus = .ready
         }
     }
 }

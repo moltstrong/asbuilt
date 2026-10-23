@@ -100,7 +100,7 @@ enum RoomScanSaver {
         let dir = store.captureDirectory(job: jobID, capture: capture.id)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        try room.export(to: dir.appendingPathComponent(CaptureFile.roomUSDZ), exportOptions: .parametric)
+        let plan = RoomPlanAdapter.floorPlan(from: room, name: title)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted]
         try encoder.encode(room).write(to: dir.appendingPathComponent(CaptureFile.roomJSON), options: .atomic)
@@ -108,12 +108,20 @@ enum RoomScanSaver {
             try? encoder.encode(rawData).write(to: dir.appendingPathComponent("roomdata.json"), options: .atomic)
         }
 
-        let plan = RoomPlanAdapter.floorPlan(from: room, name: title)
+        // Persist the scan before any third-party 3D export, so the data survives whatever happens next.
         try store.setPlan(plan, job: jobID, capture: capture.id)
         store.addCapture(capture, to: jobID)
         if let job = store.job(jobID) {
             try ExportService.writePlanExports(plan: plan, to: dir, context: .init(job: job, capture: capture),
                                                units: Preferences.units, options: Preferences.takeoffOptions)
+        }
+        // Our own massing model (pure Swift, never SceneKit's USD writer), then Apple's parametric USDZ.
+        // A RoomPlan export failure is non-fatal: the viewer falls back to model.usdz.
+        _ = try? ExportService.writeRoomModel(plan: plan, to: dir)
+        do {
+            try room.export(to: dir.appendingPathComponent(CaptureFile.roomUSDZ), exportOptions: .parametric)
+        } catch {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(CaptureFile.roomUSDZ))
         }
         return capture
     }

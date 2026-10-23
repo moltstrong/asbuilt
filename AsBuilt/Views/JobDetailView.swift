@@ -92,7 +92,7 @@ struct JobDetailView: View {
                 Menu {
                     Button("Edit job", systemImage: "pencil") { showingEditor = true }
                     if job.isDemo {
-                        Button("Reset demo", systemImage: "arrow.counterclockwise") { store.ensureDemoJob(reset: true) }
+                        Button("Reset demo", systemImage: "arrow.counterclockwise") { Task { await store.resetDemo() } }
                     } else {
                         Button("Delete job", systemImage: "trash", role: .destructive) { confirmDelete = true }
                     }

@@ -20,6 +20,7 @@ Screenshots come from the iOS Simulator in CI (`scripts/capture-screenshots.sh`)
 - **Room scan (Apple RoomPlan).** Guided LiDAR scan with Apple's on-screen coaching. When you tap Done the
   room is processed and saved as:
   - `room.usdz`: parametric 3D room model from `CapturedRoom.export(... .parametric)`
+  - `model.usdz`: AsBuilt's own massing model of the plan (walls with openings, floor, windows, doors, fixtures)
   - `room.json`: the raw `CapturedRoom`, so it can be processed again later
   - `plan.json`: AsBuilt's 2D plan data (walls, openings, fixtures) in meters
   - `floorplan.dxf`: 2D CAD plan (details below)
@@ -145,13 +146,16 @@ AsBuiltCore/      Swift package with all platform-independent logic (no RoomPlan
   Units                     ft-in / metric formatting
   PlanDrawing               plan geometry (wall faces, door swings, dimensions, labels)
   DXFWriter, SVGRenderer, CSVWriter, ZipWriter
+  RoomModel, Triangulation  3D massing meshes (ear-clipped floor, walls with openings, doors, fixtures)
+  USDAWriter                USDA layer + 64-byte-aligned USDZ packager (checked with `usdchecker --arkit`)
 AsBuilt/          SwiftUI iOS app
   Capture/        RoomPlan scanner + CapturedRoom → FloorPlan adapter, Object Capture flow, capability checks
-  Export/         PDF renderer, SceneKit USDZ massing model, export/zip service
+  Export/         PDF renderer, export/zip service (USDZ comes from AsBuiltCore, never SCNScene.write)
   Views/          jobs, plan canvas, takeoff, 3D/AR Quick Look, files/share, device check, settings
 AsBuiltTests/     XCTest app tests (run in the Simulator in CI)
 project.yml       XcodeGen spec (AsBuilt.xcodeproj is generated from it and committed)
-.github/workflows/ios.yml          CI: swift test, simulator build + tests, device build, screenshots
+.github/workflows/ios.yml          CI: swift test + usdchecker, simulator build + tests, device build, screenshots;
+                                   second job on the xcode-27 image: iOS 27 app tests + launch smoke test
 .github/workflows/testflight.yml   manual: signed archive + TestFlight upload
 ```
 
@@ -183,4 +187,7 @@ and `-AsBuiltResetDemo YES`.
   reconstruction. Expect some tuning after the first real scans.
 - Each scan is one room. Merging several rooms with `StructureBuilder` is not implemented.
 - Curved walls are exported as straight chords. Sloped ceilings report the tallest wall height.
-- Sample rooms use a generated SceneKit massing model. Real scans use Apple's RoomPlan USDZ.
+- Sample rooms use AsBuilt's generated massing model (`model.usdz`, written by AsBuiltCore). Real scans also get
+  Apple's RoomPlan USDZ (`room.usdz`), which the 3D tab prefers when present.
+- The demo job's files are generated after the first frame. If generating them ever crashes the app, the next
+  launch skips that step and shows a notice instead (Reset demo on the demo job retries).

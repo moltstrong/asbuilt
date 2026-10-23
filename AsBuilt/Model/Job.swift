@@ -1,7 +1,7 @@
 import Foundation
 import AsBuiltCore
 
-enum CaptureKind: String, Codable, CaseIterable, Hashable {
+enum CaptureKind: String, Codable, CaseIterable, Hashable, Sendable {
     case room
     case object
 
@@ -20,7 +20,7 @@ enum CaptureKind: String, Codable, CaseIterable, Hashable {
     }
 }
 
-enum CaptureOrigin: String, Codable, Hashable {
+enum CaptureOrigin: String, Codable, Hashable, Sendable {
     /// LiDAR room scan via RoomPlan.
     case roomPlan
     /// Guided photo capture via RealityKit Object Capture.
@@ -29,7 +29,7 @@ enum CaptureOrigin: String, Codable, Hashable {
     case sample
 }
 
-enum CaptureStatus: String, Codable, Hashable {
+enum CaptureStatus: String, Codable, Hashable, Sendable {
     case complete
     /// Photos saved; 3D reconstruction not done on device (reconstruct on a Mac).
     case imagesOnly
@@ -37,7 +37,7 @@ enum CaptureStatus: String, Codable, Hashable {
     case failed
 }
 
-struct Capture: Codable, Identifiable, Hashable {
+struct Capture: Codable, Identifiable, Hashable, Sendable {
     var id: UUID
     var kind: CaptureKind
     var origin: CaptureOrigin
@@ -62,7 +62,7 @@ struct Capture: Codable, Identifiable, Hashable {
     }
 }
 
-struct Job: Codable, Identifiable, Hashable {
+struct Job: Codable, Identifiable, Hashable, Sendable {
     var id: UUID
     var name: String
     var address: String

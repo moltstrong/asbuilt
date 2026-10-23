@@ -9,7 +9,6 @@
 /* Begin PBXBuildFile section */
 		1B53745D0BFCAC52E82BDFDF /* RoomPlanAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36634BBF4BF9036D23B8D57F /* RoomPlanAdapter.swift */; };
 		2101842F16BD85CD13372AC0 /* DeviceCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE773C26A7825C401A2C7EBC /* DeviceCapabilities.swift */; };
-		339771645D7013D1961A1DB4 /* SceneModelBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E372A58DB37DB07F68D5AECB /* SceneModelBuilder.swift */; };
 		425E380A83E01532EB49D30D /* ModelAndFilesViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55CE9CFC2C82DB014A1E62BE /* ModelAndFilesViews.swift */; };
 		4AF0596E5CD2200CA2FC8889 /* CaptureLaunchers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 392F2A25096FF32008CA869E /* CaptureLaunchers.swift */; };
 		4B763A5A01CDFAC57B1D7A8E /* ExportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53A231D1565D833B17CB3DC4 /* ExportService.swift */; };
@@ -67,7 +66,6 @@
 		DE773C26A7825C401A2C7EBC /* DeviceCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCapabilities.swift; sourceTree = "<group>"; };
 		DEA4678CB03C4E7B98804041 /* PlanCGDrawer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanCGDrawer.swift; sourceTree = "<group>"; };
 		E2CA3B599C8DA730DED1551B /* RoomScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomScanView.swift; sourceTree = "<group>"; };
-		E372A58DB37DB07F68D5AECB /* SceneModelBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneModelBuilder.swift; sourceTree = "<group>"; };
 		EBFEAB7DE9B3D3417AFAE70E /* CaptureDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureDetailView.swift; sourceTree = "<group>"; };
 		F11D54B6B89E71C3C6C3BCA7 /* JobListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobListView.swift; sourceTree = "<group>"; };
 		F60F774D31E3963AD9C59923 /* AsBuiltAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsBuiltAppTests.swift; sourceTree = "<group>"; };
@@ -193,7 +191,6 @@
 				53A231D1565D833B17CB3DC4 /* ExportService.swift */,
 				1B203540A0BFC851F5AFC2FF /* PDFPlanRenderer.swift */,
 				DEA4678CB03C4E7B98804041 /* PlanCGDrawer.swift */,
-				E372A58DB37DB07F68D5AECB /* SceneModelBuilder.swift */,
 			);
 			path = Export;
 			sourceTree = "<group>";
@@ -323,7 +320,6 @@
 				1B53745D0BFCAC52E82BDFDF /* RoomPlanAdapter.swift in Sources */,
 				C353C6C4554C26AE79E1F448 /* RoomScanView.swift in Sources */,
 				837D5BAF63662FB99B6830ED /* Router.swift in Sources */,
-				339771645D7013D1961A1DB4 /* SceneModelBuilder.swift in Sources */,
 				5241B655B4BFA83CD04A4BAB /* TakeoffView.swift in Sources */,
 				86568911BECDC906613EABD6 /* Theme.swift in Sources */,
 			);

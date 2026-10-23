@@ -7,6 +7,8 @@ struct AsBuiltApp: App {
     @StateObject private var router: Router
 
     init() {
+        // Keep launch cheap and exception-free: read JSON and write the demo job/plan JSON only.
+        // The demo's DXF/SVG/CSV/PDF/USDZ files are generated after the first frame (RootView .task).
         let launch = LaunchOptions.current
         let store = JobStore()
         store.ensureDemoJob(reset: launch.resetDemo)
@@ -26,6 +28,7 @@ struct AsBuiltApp: App {
 
 struct RootView: View {
     @EnvironmentObject private var router: Router
+    @EnvironmentObject private var store: JobStore
 
     var body: some View {
         NavigationStack(path: $router.path) {
@@ -43,5 +46,6 @@ struct RootView: View {
                     }
                 }
         }
+        .task { await store.prepareDemoExports() }
     }
 }

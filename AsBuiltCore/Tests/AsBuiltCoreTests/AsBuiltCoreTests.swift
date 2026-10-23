@@ -15,6 +15,18 @@ private func rectangleRoom(widthFt: Double, depthFt: Double, heightFt: Double = 
     return FloorPlan(name: "Test", walls: walls, ceilingHeight: h)
 }
 
+/// L-shaped room (10' x 12' with a 4' x 5' notch out of the north-east corner), walls counter-clockwise.
+private func lShapedRoom() -> FloorPlan {
+    let pts = [Point2D(0, 0), Point2D(ft(10), 0), Point2D(ft(10), ft(7)), Point2D(ft(6), ft(7)),
+               Point2D(ft(6), ft(12)), Point2D(0, ft(12))]
+    let walls = (0..<pts.count).map { WallSegment(start: pts[$0], end: pts[($0 + 1) % pts.count], height: ft(8)) }
+    let door = Opening(kind: .door, wallID: walls[5].id, offset: ft(3), width: ft(3), height: inch(80))
+    let window = Opening(kind: .window, wallID: walls[0].id, offset: ft(5), width: ft(4), height: ft(4), sillHeight: ft(3))
+    let desk = FixtureBox(label: "Desk / table", center: Point2D(ft(3), ft(9)), width: ft(4), depth: ft(2),
+                          height: inch(30), rotation: .pi / 6)
+    return FloorPlan(name: "L Room", walls: walls, openings: [door, window], fixtures: [desk], ceilingHeight: ft(8))
+}
+
 @Suite("Geometry")
 struct GeometryTests {
     @Test func shoelaceAreaAndPerimeter() {
@@ -552,6 +564,12 @@ struct SampleExportTests {
         }
         try zip.archive().write(to: url.appendingPathComponent("AsBuilt-Demo.zip"))
         #expect(FileManager.default.fileExists(atPath: url.appendingPathComponent("floorplan.dxf").path))
+        // 3D massing models (validated in CI/locally with `usdchecker --arkit`).
+        for (name, room) in [("bedroom", SampleData.bedroom()), ("kitchen", SampleData.kitchen()), ("l-shaped", lShapedRoom())] {
+            try USDAWriter.write(plan: room).write(to: url.appendingPathComponent("\(name).usda"), atomically: true, encoding: .utf8)
+            try USDZPackager.roomModel(plan: room).write(to: url.appendingPathComponent("\(name).usdz"))
+        }
+        #expect(FileManager.default.fileExists(atPath: url.appendingPathComponent("bedroom.usdz").path))
     }
 }
 
@@ -685,5 +703,260 @@ struct FixtureLabelFitTests {
     @Test func abbreviationTable() {
         #expect(PlanDrawing.abbreviation(for: "Refrigerator") == "REF")
         #expect(PlanDrawing.abbreviation(for: "unknown thing") == nil)
+    }
+}
+
+// MARK: - USD / USDZ
+
+/// One stored entry parsed back out of a ZIP via its central directory.
+private struct ParsedZipEntry {
+    var name: String
+    var method: UInt16
+    var flags: UInt16
+    var crc: UInt32
+    var compressedSize: Int
+    var size: Int
+    var localHeaderOffset: Int
+    var dataOffset: Int
+    var data: Data
+}
+
+private func parseZip(_ data: Data) -> [ParsedZipEntry] {
+    let eocd = data.count - 22
+    guard eocd >= 0, data.readLE(UInt32.self, at: eocd) == 0x06054b50 else { return [] }
+    let count = Int(data.readLE(UInt16.self, at: eocd + 10))
+    var cursor = Int(data.readLE(UInt32.self, at: eocd + 16))
+    var entries: [ParsedZipEntry] = []
+    for _ in 0..<count {
+        guard data.readLE(UInt32.self, at: cursor) == 0x02014b50 else { break }
+        let flags = data.readLE(UInt16.self, at: cursor + 8)
+        let method = data.readLE(UInt16.self, at: cursor + 10)
+        let crc = data.readLE(UInt32.self, at: cursor + 16)
+        let csize = Int(data.readLE(UInt32.self, at: cursor + 20))
+        let size = Int(data.readLE(UInt32.self, at: cursor + 24))
+        let nameLen = Int(data.readLE(UInt16.self, at: cursor + 28))
+        let extraLen = Int(data.readLE(UInt16.self, at: cursor + 30))
+        let commentLen = Int(data.readLE(UInt16.self, at: cursor + 32))
+        let local = Int(data.readLE(UInt32.self, at: cursor + 42))
+        let name = String(decoding: data[(data.startIndex + cursor + 46)..<(data.startIndex + cursor + 46 + nameLen)], as: UTF8.self)
+        // Local header.
+        let localNameLen = Int(data.readLE(UInt16.self, at: local + 26))
+        let localExtraLen = Int(data.readLE(UInt16.self, at: local + 28))
+        let dataOffset = local + 30 + localNameLen + localExtraLen
+        let payload = data[(data.startIndex + dataOffset)..<(data.startIndex + dataOffset + csize)]
+        entries.append(ParsedZipEntry(name: name, method: method, flags: flags, crc: crc, compressedSize: csize, size: size,
+                                      localHeaderOffset: local, dataOffset: dataOffset, data: Data(payload)))
+        cursor += 46 + nameLen + extraLen + commentLen
+    }
+    return entries
+}
+
+private func triangleArea(_ a: Point2D, _ b: Point2D, _ c: Point2D) -> Double { (b - a).cross(c - a) / 2 }
+
+@Suite("Triangulation")
+struct TriangulationTests {
+    @Test func concaveLPolygonAreaIsPreserved() {
+        // 10x10 square minus a 5x5 notch = 75 (reflex corner at (5, 5)).
+        let l = [Point2D(0, 0), Point2D(10, 0), Point2D(10, 5), Point2D(5, 5), Point2D(5, 10), Point2D(0, 10)]
+        for polygon in [l, Array(l.reversed()), Array(l[3...] + l[..<3])] {
+            let tris = Triangulator.triangulate(polygon)
+            #expect(tris.count == polygon.count - 2)
+            var sum = 0.0
+            for t in tris {
+                let area = triangleArea(polygon[t[0]], polygon[t[1]], polygon[t[2]])
+                #expect(area > 0) // counter-clockwise, non-degenerate
+                sum += area
+                // Every triangle lies inside the L (its centroid is not in the notch).
+                let c = (polygon[t[0]] + polygon[t[1]] + polygon[t[2]]) * (1.0 / 3)
+                #expect(Polygon2D.contains(c, in: polygon))
+            }
+            #expect(approx(sum, 75, 1e-9))
+        }
+    }
+
+    @Test func uShapeAndCollinearAndDuplicatePoints() {
+        // U shape with a collinear midpoint on the bottom edge and a duplicated closing vertex.
+        let u = [Point2D(0, 0), Point2D(3, 0), Point2D(6, 0), Point2D(6, 6), Point2D(4, 6), Point2D(4, 2),
+                 Point2D(2, 2), Point2D(2, 6), Point2D(0, 6), Point2D(0, 0)]
+        let tris = Triangulator.triangulate(u)
+        let sum = tris.reduce(0.0) { $0 + triangleArea(u[$1[0]], u[$1[1]], u[$1[2]]) }
+        #expect(approx(sum, Polygon2D.area(u), 1e-9))
+        #expect(approx(sum, 36 - 8, 1e-9))
+        #expect(tris.allSatisfy { triangleArea(u[$0[0]], u[$0[1]], u[$0[2]]) > 0 })
+    }
+
+    @Test func degenerateInput() {
+        #expect(Triangulator.triangulate([]).isEmpty)
+        #expect(Triangulator.triangulate([Point2D(0, 0), Point2D(1, 0)]).isEmpty)
+        #expect(Triangulator.triangulate([Point2D(0, 0), Point2D(1, 0), Point2D(2, 0)]).isEmpty)
+        #expect(Triangulator.triangulate([Point2D(0, 0), Point2D(1, 0), Point2D(0, 1)]).count == 1)
+    }
+}
+
+@Suite("USDZ packaging")
+struct USDZPackagerTests {
+    @Test func everyEntryIsStoredAligned64WithValidCRC() {
+        // Odd name lengths and payload sizes force different padding amounts, including the
+        // "padding < 4 bytes" case that needs a whole extra 64-byte block.
+        var resources: [(path: String, data: Data)] = []
+        for i in 0..<70 {
+            resources.append((path: String(repeating: "t", count: i % 9 + 1) + "/\(i).png",
+                              data: Data((0..<(i * 7 + 1)).map { UInt8(truncatingIfNeeded: $0 &* 31) })))
+        }
+        let layer = Data("#usda 1.0\n".utf8)
+        let usdz = USDZPackager.package(rootLayerName: "room.usda", rootLayer: layer, resources: resources)
+        #expect(Array(usdz.prefix(4)) == [0x50, 0x4B, 0x03, 0x04])
+        let entries = parseZip(usdz)
+        #expect(entries.count == 71)
+        #expect(entries.first?.name == "room.usda")
+        #expect(entries.first?.data == layer)
+        var paddedCount = 0
+        for (i, e) in entries.enumerated() {
+            #expect(e.dataOffset % 64 == 0, "entry \(e.name) data at \(e.dataOffset)")
+            #expect(e.method == 0)                 // STORE
+            #expect(e.flags & 0x0009 == 0)          // not encrypted, no data descriptor
+            #expect(e.compressedSize == e.size)
+            #expect(CRC32.checksum(e.data) == e.crc)
+            if i > 0 { #expect(e.data == resources[i - 1].data) }
+            let extraLen = Int(usdz.readLE(UInt16.self, at: e.localHeaderOffset + 28))
+            if extraLen > 0 {
+                paddedCount += 1
+                #expect(usdz.readLE(UInt16.self, at: e.localHeaderOffset + 30 + e.name.utf8.count) == 0x1986)
+                #expect(Int(usdz.readLE(UInt16.self, at: e.localHeaderOffset + 32 + e.name.utf8.count)) == extraLen - 4)
+            }
+            // Local header agrees with the central directory.
+            #expect(usdz.readLE(UInt32.self, at: e.localHeaderOffset) == 0x04034b50)
+            #expect(usdz.readLE(UInt32.self, at: e.localHeaderOffset + 14) == e.crc)
+        }
+        #expect(paddedCount > 0)
+    }
+
+    @Test func paddingExtraFieldMath() {
+        for headerOffset in stride(from: 0, through: 256, by: 1) {
+            for nameLength in [1, 9, 10, 29, 30, 33, 34, 63] {
+                let extra = ZipWriter.paddingExtraField(headerOffset: headerOffset, nameLength: nameLength, alignment: 64)
+                #expect((headerOffset + 30 + nameLength + extra.count) % 64 == 0)
+                #expect(extra.isEmpty || extra.count >= 4)
+            }
+        }
+        // Default ZipWriter (share ZIPs) is unchanged: no extra field.
+        #expect(ZipWriter.paddingExtraField(headerOffset: 3, nameLength: 5, alignment: 1).isEmpty)
+    }
+
+    @Test func roomModelPackageContainsTheUSDALayer() {
+        let plan = SampleData.kitchen()
+        let usdz = USDZPackager.roomModel(plan: plan)
+        let entries = parseZip(usdz)
+        #expect(entries.count == 1)
+        #expect(entries[0].name == "model.usda")
+        #expect(entries[0].dataOffset % 64 == 0)
+        #expect(String(decoding: entries[0].data, as: UTF8.self) == USDAWriter.write(plan: plan))
+    }
+}
+
+@Suite("USD room model")
+struct USDRoomModelTests {
+    @Test func usdaHasStageMetadataMaterialsAndBoundMeshes() {
+        let usda = USDAWriter.write(plan: SampleData.bedroom())
+        #expect(usda.hasPrefix("#usda 1.0\n"))
+        #expect(usda.contains("defaultPrim = \"Room\""))
+        #expect(usda.contains("metersPerUnit = 1\n"))
+        #expect(usda.contains("upAxis = \"Y\""))
+        #expect(usda.contains("def Xform \"Room\" ("))
+        #expect(usda.contains("kind = \"component\""))
+        for material in ["Wall", "Floor", "Glass", "Door", "Fixture"] {
+            #expect(usda.contains("def Material \"\(material)\""), "missing material \(material)")
+        }
+        #expect(usda.contains("float inputs:opacity = 0.45"))
+        let meshes = RoomModelBuilder.meshes(for: SampleData.bedroom())
+        // Floor + 4 walls + 2 windows + 1 door leaf + 2 fixtures.
+        #expect(meshes.count == 10)
+        #expect(usda.components(separatedBy: "def Mesh ").count - 1 == meshes.count)
+        #expect(usda.components(separatedBy: "rel material:binding = </Room/Materials/").count - 1 == meshes.count)
+        #expect(usda.components(separatedBy: "prepend apiSchemas = [\"MaterialBindingAPI\"]").count - 1 == meshes.count)
+        #expect(usda.components(separatedBy: "uniform token subdivisionScheme = \"none\"").count - 1 == meshes.count)
+        #expect(!usda.contains("nan") && !usda.contains("inf,") && !usda.contains("inf)"))
+        for mesh in meshes {
+            #expect(mesh.indices.count % 3 == 0)
+            #expect(mesh.indices.allSatisfy { $0 >= 0 && $0 < mesh.points.count })
+            #expect(mesh.normals.count == mesh.points.count)
+        }
+    }
+
+    @Test func meshBoundsMatchPlanExtents() throws {
+        for plan in [SampleData.bedroom(), SampleData.kitchen()] {
+            let t = WallSegment.defaultThickness
+            let outline = try #require(Rect2D.enclosing(plan.walls.flatMap { [$0.start, $0.end] }))
+            let meshes = RoomModelBuilder.meshes(for: plan)
+            let b = try #require(RoomModelBuilder.bounds(of: meshes))
+            // Walls are drawn outward from the interior faces; USD z = -plan y.
+            #expect(approx(b.min.x, outline.minX - t, 1e-9))
+            #expect(approx(b.max.x, outline.maxX + t, 1e-9))
+            #expect(approx(b.min.z, -(outline.maxY + t), 1e-9))
+            #expect(approx(b.max.z, -(outline.minY - t), 1e-9))
+            #expect(approx(b.min.y, -RoomModelBuilder.floorThickness, 1e-9))
+            #expect(approx(b.max.y, plan.walls.map(\.height).max()!, 1e-9))
+            // The floor slab covers exactly the interior outline.
+            let floor = try #require(meshes.first { $0.name == "Floor" }?.bounds)
+            #expect(approx(floor.min.x, outline.minX) && approx(floor.max.x, outline.maxX))
+            #expect(approx(floor.min.z, -outline.maxY) && approx(floor.max.z, -outline.minY))
+            // The extent written to the USDA matches.
+            let usda = USDAWriter.write(meshes: meshes, name: plan.name)
+            #expect(usda.contains("float3[] extent = [\(USDAWriter.vec(floor.min)), \(USDAWriter.vec(floor.max))]"))
+        }
+    }
+
+    @Test func lShapedFloorIsEarClippedNotHulled() throws {
+        let plan = lShapedRoom()
+        #expect(plan.resolveFloorPolygon().source == .wallLoop)
+        let floor = try #require(RoomModelBuilder.meshes(for: plan).first { $0.name == "Floor" })
+        // Sum the area of the upward-facing cap: must equal the L area (10x12 - 4x5 = 100 sq ft), not the hull.
+        var top = 0.0
+        for k in stride(from: 0, to: floor.indices.count, by: 3) {
+            let p = (0..<3).map { floor.points[floor.indices[k + $0]] }
+            guard p.allSatisfy({ abs($0.y) < 1e-12 }) else { continue }
+            let a = Point2D(p[0].x, -p[0].z), b = Point2D(p[1].x, -p[1].z), c = Point2D(p[2].x, -p[2].z)
+            top += triangleArea(a, b, c)
+            // Winding: counter-clockwise in plan = facing +Y in USD.
+            #expect(triangleArea(a, b, c) > 0)
+        }
+        #expect(approx(top, ft(10) * ft(12) - ft(4) * ft(5), 1e-9))
+    }
+
+    @Test func doorLeafOpensSeventyDegreesIntoTheRoom() throws {
+        let plan = SampleData.bedroom()
+        let door = try #require(plan.openings.first { $0.kind == .door })
+        let leaf = try #require(RoomModelBuilder.meshes(for: plan).first { $0.material == .door })
+        let b = try #require(leaf.bounds)
+        // West wall: the leaf swings east (into the room, +x) by width * sin(70 deg) from the wall centerline.
+        let centerline = -WallSegment.defaultThickness / 2
+        let reach = door.width * sin(70 * Double.pi / 180)
+        #expect(b.max.x > centerline + reach - 0.03 && b.max.x < centerline + reach + 0.03)
+        #expect(approx(b.min.y, 0) && approx(b.max.y, door.height))
+        // All of it lies within the wall's thickness or the room, never outside the building.
+        #expect(b.min.x > -WallSegment.defaultThickness)
+    }
+
+    @Test func rotatedFixtureUsesItsFootprint() throws {
+        let plan = lShapedRoom()
+        let desk = plan.fixtures[0]
+        let mesh = try #require(RoomModelBuilder.meshes(for: plan).first { $0.material == .fixture })
+        let b = try #require(mesh.bounds)
+        let footprint = try #require(Rect2D.enclosing(desk.corners))
+        #expect(approx(b.min.x, footprint.minX) && approx(b.max.x, footprint.maxX))
+        #expect(approx(b.min.z, -footprint.maxY) && approx(b.max.z, -footprint.minY))
+        #expect(approx(b.max.y, desk.height))
+        #expect(mesh.name.hasPrefix("Fixture1_Desk_table"))
+    }
+
+    @Test func identifiersAndNumbers() {
+        #expect(USDAWriter.identifier("Desk / table") == "Desk_table")
+        #expect(USDAWriter.identifier("2nd fridge") == "_2nd_fridge")
+        #expect(USDAWriter.identifier("") == "Item")
+        #expect(USDAWriter.identifier("Ünïcode") == "nic_de" || !USDAWriter.identifier("Ünïcode").isEmpty)
+        #expect(USDAWriter.num(-0.0000001) == "0")
+        #expect(USDAWriter.num(1.5) == "1.5")
+        #expect(USDAWriter.num(-2) == "-2")
+        #expect(USDAWriter.quoted("a \"b\"\n") == "\"a \\\"b\\\"\\n\"")
     }
 }

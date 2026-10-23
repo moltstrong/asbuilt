@@ -3,7 +3,7 @@ import AsBuiltCore
 
 /// Writes every CAD/estimating deliverable for a room capture.
 enum ExportService {
-    struct Context {
+    struct Context: Sendable {
         var jobName: String
         var address: String
         var client: String
@@ -43,6 +43,15 @@ enum ExportService {
     @discardableResult
     static func writePlanExports(plan: FloorPlan, to dir: URL, context: Context, units: UnitSystem,
                                  options: TakeoffOptions) throws -> [URL] {
+        var urls = try writeCADExports(plan: plan, to: dir, context: context, units: units, options: options)
+        urls.append(try writePDF(plan: plan, to: dir, context: context, units: units, options: options))
+        return urls
+    }
+
+    /// floorplan.dxf, floorplan.svg and takeoff.csv. Pure AsBuiltCore text output: safe on any thread.
+    @discardableResult
+    static func writeCADExports(plan: FloorPlan, to dir: URL, context: Context, units: UnitSystem,
+                                options: TakeoffOptions) throws -> [URL] {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let takeoff = TakeoffCalculator.calculate(plan, options: options)
 
@@ -62,12 +71,32 @@ enum ExportService {
 
         let csvURL = dir.appendingPathComponent(CaptureFile.csv)
         try Data(CSVWriter.write(plan: plan, takeoff: takeoff, units: units).utf8).write(to: csvURL, options: .atomic)
+        return [dxfURL, svgURL, csvURL]
+    }
 
+    /// floorplan.pdf (plan sheet + takeoff), drawn with UIGraphicsPDFRenderer.
+    @discardableResult
+    static func writePDF(plan: FloorPlan, to dir: URL, context: Context, units: UnitSystem,
+                         options: TakeoffOptions) throws -> URL {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let takeoff = TakeoffCalculator.calculate(plan, options: options)
         let pdfURL = dir.appendingPathComponent(CaptureFile.pdf)
         let pdf = PDFPlanRenderer.render(plan: plan, takeoff: takeoff, context: context, units: units)
         try pdf.write(to: pdfURL, options: .atomic)
+        return pdfURL
+    }
 
-        return [dxfURL, svgURL, csvURL, pdfURL]
+    /// model.usdz: the room's 3D massing model (walls with openings, floor, windows, doors, fixtures).
+    ///
+    /// Written by AsBuiltCore's own USDA writer + 64-byte-aligned USDZ packager. Do NOT use
+    /// `SCNScene.write(to:)` here: on iOS 27 SceneKit's USDKit exporter throws an uncatchable
+    /// NSRangeException for this geometry (crashed every launch in build 1.0 (3)).
+    @discardableResult
+    static func writeRoomModel(plan: FloorPlan, to dir: URL) throws -> URL {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(CaptureFile.modelUSDZ)
+        try USDZPackager.roomModel(plan: plan).write(to: url, options: .atomic)
+        return url
     }
 
     /// Bundles files (recursing into folders) into one stored ZIP in the temporary directory.

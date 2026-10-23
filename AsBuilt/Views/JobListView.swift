@@ -38,6 +38,7 @@ struct JobListView: View {
                             .buttonStyle(.plain)
                             .accessibilityIdentifier("demoJobRow")
                     }
+                    DemoStatusLine()
                 }
             }
             .padding(16)
@@ -96,6 +97,32 @@ struct JobListView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .card()
+    }
+}
+
+/// "Preparing demo…" while the demo files are generated after launch, or a non-fatal notice.
+struct DemoStatusLine: View {
+    @EnvironmentObject private var store: JobStore
+
+    var body: some View {
+        if store.demoStatus == .preparing {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Preparing demo…").font(.footnote).foregroundStyle(.secondary)
+            }
+            .accessibilityIdentifier("demoPreparing")
+        } else if let notice = store.demoNotice {
+            Label(notice, systemImage: "exclamationmark.triangle")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("demoNotice")
+        } else if case .failed(let message) = store.demoStatus {
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
