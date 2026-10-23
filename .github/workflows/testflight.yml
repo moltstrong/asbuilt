@@ -1,0 +1,171 @@
+name: TestFlight
+
+# Manual only: Actions tab › TestFlight › Run workflow.
+# Needs repo secrets ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8, APPLE_TEAM_ID (see README "TestFlight").
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: Archive and upload to TestFlight
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      BUNDLE_ID: ${{ vars.BUNDLE_ID != '' && vars.BUNDLE_ID || 'com.moltstrong.asbuilt' }}
+      BUILD_NUMBER: ${{ github.run_number }}
+      ARCHIVE_PATH: ${{ github.workspace }}/build/AsBuilt.xcarchive
+      EXPORT_PATH: ${{ github.workspace }}/build/export
+    steps:
+      - name: Check required secrets
+        run: |
+          missing=()
+          for name in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 APPLE_TEAM_ID; do
+            if [ -z "${!name}" ]; then missing+=("$name"); fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error title=Missing secrets::Add these repository secrets, then re-run: ${missing[*]}. Settings › Secrets and variables › Actions: https://github.com/${{ github.repository }}/settings/secrets/actions"
+            exit 1
+          fi
+          echo "All 4 secrets present. Bundle ID: $BUNDLE_ID  Build number: $BUILD_NUMBER"
+
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep -E "iphoneos"
+
+      - name: Install App Store Connect API key
+        run: |
+          KEY_DIR="$HOME/.appstoreconnect/private_keys"
+          KEY_PATH="$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+          mkdir -p "$KEY_DIR"
+          if printf '%s' "$ASC_KEY_P8" | grep -q "BEGIN PRIVATE KEY"; then
+            # Raw .p8 text (also tolerates literal "\n" sequences from copy/paste).
+            printf '%b\n' "$ASC_KEY_P8" > "$KEY_PATH"
+          else
+            # Fallback: base64-encoded .p8.
+            printf '%s' "$ASC_KEY_P8" | base64 --decode > "$KEY_PATH"
+          fi
+          chmod 600 "$KEY_PATH"
+          if ! grep -q "BEGIN PRIVATE KEY" "$KEY_PATH"; then
+            echo "::error title=Bad ASC_KEY_P8::ASC_KEY_P8 must be the full contents of AuthKey_XXXX.p8, including the BEGIN/END PRIVATE KEY lines."
+            exit 1
+          fi
+          echo "ASC_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Prepare a temporary signing keychain
+        run: |
+          # Xcode creates/downloads signing certificates here via -allowProvisioningUpdates.
+          KEYCHAIN="$RUNNER_TEMP/asbuilt-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          read -r -a EXISTING <<< "$(security list-keychains -d user | tr -d '"' | xargs)"
+          security list-keychains -d user -s "$KEYCHAIN" "${EXISTING[@]}"
+          security default-keychain -s "$KEYCHAIN"
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Pre-upload checks (icon, Info.plist)
+        run: |
+          ICON=AsBuilt/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+          sips -g pixelWidth -g pixelHeight -g hasAlpha "$ICON"
+          sips -g hasAlpha "$ICON" | grep -q "hasAlpha: no" || { echo "::error::App icon must not have an alpha channel"; exit 1; }
+          plutil -lint AsBuilt/Info.plist AsBuilt/Resources/PrivacyInfo.xcprivacy
+          test "$(plutil -extract ITSAppUsesNonExemptEncryption raw AsBuilt/Info.plist)" = "false"
+          plutil -extract NSCameraUsageDescription raw AsBuilt/Info.plist
+
+      - name: Archive (Release, automatic signing)
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project AsBuilt.xcodeproj \
+            -scheme AsBuilt \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE_PATH" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            2>&1 | tee archive.log | grep -E "error:|warning: .*(sign|provision)|ARCHIVE (SUCCEEDED|FAILED)" || true
+          grep -q "ARCHIVE SUCCEEDED" archive.log
+          APP="$ARCHIVE_PATH/Products/Applications/AsBuilt.app"
+          echo "Bundle ID:      $(plutil -extract CFBundleIdentifier raw "$APP/Info.plist")"
+          echo "Version:        $(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist")"
+          echo "Build number:   $(plutil -extract CFBundleVersion raw "$APP/Info.plist")"
+
+      - name: Write ExportOptions.plist
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>destination</key>
+            <string>upload</string>
+            <key>teamID</key>
+            <string>${APPLE_TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>manageAppVersionAndBuildNumber</key>
+            <false/>
+          </dict>
+          </plist>
+          EOF
+          plutil -lint "$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Export and upload to App Store Connect (TestFlight)
+        run: |
+          set -o pipefail
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            2>&1 | tee export.log
+          grep -q "EXPORT SUCCEEDED" export.log
+          echo "### Uploaded AsBuilt 1.0 ($BUILD_NUMBER) to App Store Connect" >> "$GITHUB_STEP_SUMMARY"
+          echo "Bundle ID \`$BUNDLE_ID\`. The build appears in TestFlight after Apple finishes processing (usually 5-30 min)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testflight-logs
+          path: |
+            archive.log
+            export.log
+            ${{ env.EXPORT_PATH }}/*.plist
+            ${{ env.EXPORT_PATH }}/*.log
+          if-no-files-found: ignore
+
+      - name: Clean up key and keychain
+        if: always()
+        run: |
+          rm -rf "$HOME/.appstoreconnect/private_keys"
+          security delete-keychain "$RUNNER_TEMP/asbuilt-signing.keychain-db" 2>/dev/null || true

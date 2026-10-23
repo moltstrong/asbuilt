@@ -70,8 +70,43 @@ Screenshots come from the iOS Simulator in CI (`scripts/capture-screenshots.sh`)
    Developer Mode), then trust your developer certificate (Settings › General › VPN & Device Management).
 6. Free provisioning expires after **7 days**. Press Run again to reinstall.
 
-For the whole crew, join the Apple Developer Program ($99/yr), then *Product › Archive › Distribute App ›
-TestFlight* and invite testers by email.
+## TestFlight (GitHub Actions, no Mac needed)
+
+`.github/workflows/testflight.yml` archives a signed Release build and uploads it to App Store Connect. It
+runs only when started by hand.
+
+**One-time setup**
+
+1. **Create the app record.** In [App Store Connect](https://appstoreconnect.apple.com) › Apps › "+" › New App,
+   create the app with bundle ID `com.moltstrong.asbuilt`. Register the ID first under Certificates, IDs &
+   Profiles › Identifiers if it isn't offered. To use a different bundle ID, set the repository **variable**
+   `BUNDLE_ID` (Settings › Secrets and variables › Actions › Variables).
+2. **Create an API key.** App Store Connect › Users and Access › Integrations › App Store Connect API › Team Keys ›
+   "+", with access **App Manager** (or Admin). Download `AuthKey_XXXXXXXXXX.p8`; Apple only lets you download it once.
+3. **Add four repository secrets** at
+   <https://github.com/moltstrong/asbuilt/settings/secrets/actions> (Settings › Secrets and variables ›
+   Actions › New repository secret):
+
+   | Secret | Value |
+   | --- | --- |
+   | `ASC_KEY_ID` | the key's Key ID (10 characters, also in the .p8 file name) |
+   | `ASC_ISSUER_ID` | the Issuer ID shown above the keys list (a UUID) |
+   | `ASC_KEY_P8` | the full text of the .p8 file, including the `-----BEGIN PRIVATE KEY-----` / `END` lines |
+   | `APPLE_TEAM_ID` | your 10-character Team ID (developer.apple.com › Account › Membership details) |
+
+**Upload a build:** Actions › **TestFlight** › *Run workflow*.
+
+- The build number is the workflow run number, so each run is unique. The marketing version is `1.0` (`project.yml`).
+- Signing is automatic: `-allowProvisioningUpdates` with the API key creates the distribution certificate and
+  provisioning profile on the fly.
+- Processing in App Store Connect takes about 5 to 30 minutes.
+- Internal testers (up to 100 App Store Connect users) can install right away from the TestFlight app.
+  External testers need a one-time Beta App Review.
+- If secrets are missing, the first step fails and names the missing secrets.
+
+Upload compliance already in the app: a 1024×1024 opaque app icon, `ITSAppUsesNonExemptEncryption = NO`
+(no export-compliance prompt), camera and photo usage strings, and a `PrivacyInfo.xcprivacy` privacy manifest
+(UserDefaults reason CA92.1, no tracking, no data collection). The main CI checks these on every push.
 
 To regenerate the project after adding files: `brew install xcodegen && xcodegen generate` (the spec is `project.yml`).
 
@@ -116,7 +151,8 @@ AsBuilt/          SwiftUI iOS app
   Views/          jobs, plan canvas, takeoff, 3D/AR Quick Look, files/share, device check, settings
 AsBuiltTests/     XCTest app tests (run in the Simulator in CI)
 project.yml       XcodeGen spec (AsBuilt.xcodeproj is generated from it and committed)
-.github/workflows/ios.yml   CI: swift test, simulator build + tests, device build, screenshots
+.github/workflows/ios.yml          CI: swift test, simulator build + tests, device build, screenshots
+.github/workflows/testflight.yml   manual: signed archive + TestFlight upload
 ```
 
 CapturedRoom is turned into a plan by projecting each surface onto the floor (XZ) plane:

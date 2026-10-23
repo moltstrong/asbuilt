@@ -96,6 +96,28 @@ jobs:
           otool -L "$APP/AsBuilt" | grep -E "RoomPlan|RealityKit|RealityFoundation|SceneKit|QuickLook" || true
           nm -u "$APP/AsBuilt" | grep -c -E "RoomPlan|ObjectCapture|PhotogrammetrySession" || true
 
+      - name: App Store upload readiness (built device app)
+        run: |
+          APP=build/DeviceDerivedData/Build/Products/Release-iphoneos/AsBuilt.app
+          INFO="$APP/Info.plist"
+          get() { plutil -extract "$1" raw "$INFO"; }
+          echo "CFBundleIdentifier         = $(get CFBundleIdentifier)"
+          echo "CFBundleShortVersionString = $(get CFBundleShortVersionString)"
+          echo "CFBundleVersion            = $(get CFBundleVersion)"
+          echo "MinimumOSVersion           = $(get MinimumOSVersion)"
+          test "$(get CFBundleShortVersionString)" = "1.0"
+          test "$(get ITSAppUsesNonExemptEncryption)" = "false"
+          for key in NSCameraUsageDescription NSPhotoLibraryAddUsageDescription; do
+            echo "$key = $(get $key)"
+          done
+          plutil -extract CFBundleIcons.CFBundlePrimaryIcon.CFBundleIconName raw "$INFO"
+          test -f "$APP/Assets.car"
+          test -f "$APP/PrivacyInfo.xcprivacy" && plutil -lint "$APP/PrivacyInfo.xcprivacy"
+          ICON=AsBuilt/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+          sips -g pixelWidth -g pixelHeight -g hasAlpha "$ICON"
+          sips -g hasAlpha "$ICON" | grep -q "hasAlpha: no"
+          sips -g pixelWidth "$ICON" | grep -q "pixelWidth: 1024"
+
       - name: Simulator screenshots
         run: |
           APP="$DERIVED/Build/Products/Debug-iphonesimulator/AsBuilt.app"
