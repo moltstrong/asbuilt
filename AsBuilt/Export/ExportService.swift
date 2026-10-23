@@ -27,6 +27,7 @@ enum ExportService {
             case .objectCapture: source = "Object Capture"
             case .sample: source = "Sample data"
             case .lidarMesh: source = "LiDAR Mesh scan (ARKit)"
+            case .detailScan: source = "Detail scan (LiDAR depth fusion)"
             case .unknown: source = "AsBuilt"
             }
             self.init(jobName: job.name, address: job.address, client: job.client, roomTitle: capture.title,
@@ -111,6 +112,85 @@ enum ExportService {
             try file.data.write(to: dir.appendingPathComponent(file.name), options: .atomic)
         }
         return output.measurements
+    }
+
+    /// Detail scan (TSDF fusion) deliverables: the same files as a LiDAR Mesh scan, with vertex colors
+    /// (OBJ `v x y z r g b`, PLY uchar red/green/blue, USDZ `primvars:displayColor`) plus an optional
+    /// coach-report.txt. Pure AsBuiltCore output, safe on any thread.
+    @discardableResult
+    static func writeFusedScan(_ fused: FusedMesh, to dir: URL, title: String, units: UnitSystem,
+                               coachReport: String? = nil, progress: ((Double) -> Void)? = nil) throws -> MeshMeasurements {
+        let prepared = MeshNormalizer.prepareForExport(fused.classifiedMesh())
+        guard prepared.mesh.triangleCount > 0 else {
+            throw NSError(domain: "AsBuilt.DetailScan", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "The fused scan had no surface. Get within about 1 m and move slowly."])
+        }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let output = LiDARMeshExporter.export(prepared, title: title, units: units, progress: progress)
+        for file in output.files {
+            try file.data.write(to: dir.appendingPathComponent(file.name), options: .atomic)
+        }
+        if let coachReport {
+            try? Data(coachReport.utf8).write(to: dir.appendingPathComponent(CaptureFile.coachReport), options: .atomic)
+        }
+        return output.measurements
+    }
+
+    /// Demo Detail scan: runs the real TSDF fusion on synthetic depth maps of a small electrical box +
+    /// conduit + ball valve, then writes the colored exports.
+    @discardableResult
+    static func writeDemoDetailScan(to dir: URL, title: String, units: UnitSystem) throws -> MeshMeasurements {
+        let fused = DemoDetailScan.fuse()
+        let report = """
+        AsBuilt Capture Coach: demo Detail scan
+        Fused \(fused.stats.framesIntegrated) synthetic LiDAR depth frames (256 x 192) at 4 mm voxels.
+        Blocks: \(fused.stats.blockCount), voxels: \(fused.stats.voxelCount), memory: \(fused.stats.memoryBytes / 1024) KB.
+        Mesh: \(fused.mesh.vertexCount) vertices, \(fused.mesh.triangleCount) triangles.
+        """
+        return try writeFusedScan(fused.mesh, to: dir, title: title, units: units, coachReport: report)
+    }
+
+    /// Object Capture photos (+ reconstruction log) as a STORE zip in the temporary directory,
+    /// streamed file by file (`StreamingZipWriter`, Zip64 above 4 GB) so a 1-2 GB photo set never
+    /// sits in memory. `progress` gets 0...1.
+    static func makePhotoZip(captureDirectory: URL, title: String, progress: (@Sendable (Double) -> Void)? = nil,
+                             isCancelled: @escaping @Sendable () -> Bool = { false }) throws -> URL {
+        let fm = FileManager.default
+        let images = captureDirectory.appendingPathComponent(CaptureFile.images, isDirectory: true)
+        let files = StreamingZipWriter.regularFiles(in: images)
+        guard !files.isEmpty else {
+            throw NSError(domain: "AsBuilt.PhotoZip", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "This capture has no photos to export."])
+        }
+        let outDir = fm.temporaryDirectory.appendingPathComponent("PhotoExports", isDirectory: true)
+        try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let out = outDir.appendingPathComponent(safeFileName(title) + "-photos.zip")
+        try? fm.removeItem(at: out)
+        let folder = safeFileName(title) + "-photos"
+        do {
+            let writer = try StreamingZipWriter(url: out)
+            writer.isCancelled = isCancelled
+            try writer.addDirectory(images, prefix: "\(folder)/Images") { done, total in
+                progress?(total > 0 ? 0.98 * Double(done) / Double(total) : 0)
+            }
+            let log = captureDirectory.appendingPathComponent(CaptureFile.reconstructionLog)
+            if fm.fileExists(atPath: log.path) {
+                try writer.addFile(at: log, path: "\(folder)/\(CaptureFile.reconstructionLog)")
+            }
+            let readme = """
+            AsBuilt Object Capture photos: \(title)
+            Full-detail Mac build: open Reality Composer Pro > New Photogrammetry project and drop in the
+            Images folder (or run PhotogrammetrySession with detail .full or .raw). Import the resulting
+            USDZ back into the job with "Import USDZ model".
+            """
+            try writer.addData(Data(readme.utf8), path: "\(folder)/README.txt")
+            try writer.finish()
+        } catch {
+            try? fm.removeItem(at: out)
+            throw error
+        }
+        progress?(1)
+        return out
     }
 
     /// Bundles files (recursing into folders) into one stored ZIP in the temporary directory.

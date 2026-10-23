@@ -134,7 +134,9 @@ struct ObjectCaptureFlowView: View {
         }
         var configuration = ObjectCaptureSession.Configuration()
         configuration.checkpointDirectory = checkpointDirectory
-        configuration.isOverCaptureEnabled = false
+        // Over-capture: Object Capture keeps extra photos beyond what the on-device build uses, for a
+        // full-detail Mac build (Export photos). The phone's own reconstruction still applies its limit.
+        configuration.isOverCaptureEnabled = true
         let newSession = ObjectCaptureSession()
         newSession.start(imagesDirectory: imagesDirectory, configuration: configuration)
         session = newSession
@@ -232,35 +234,67 @@ struct ObjectCaptureControls: View {
 
     @State private var passes = 1
     @State private var confirmEarlyFinish = false
+    @StateObject private var coach = CoachDriver(mode: .objectCapture)
+    @State private var showingIntro = false
+    @State private var flipped = false
 
     private var shots: Int { session.numberOfShotsTaken }
 
+    /// Pass order: middle height first (Apple's default), then low aiming up, then high aiming down.
+    static let passBands: [CoachBand] = [.mid, .low, .high]
+
     var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Button("Cancel", action: onCancel)
-                    .buttonStyle(BigButtonStyle(filled: false, color: .white))
-                    .frame(width: 120)
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("\(shots) photos").font(.headline.monospacedDigit())
-                    if session.state == .capturing {
-                        Text("Pass \(passes) of 3").font(.caption.weight(.semibold))
+        ZStack {
+            CoachOverlay(output: coach.output, thresholds: coach.thresholds, showsReticle: false, showsSpeed: false,
+                         showsRings: false, isScanning: session.state == .capturing, problemsOnly: true)
+            VStack(spacing: 12) {
+                HStack(alignment: .top) {
+                    Button("Cancel", action: onCancel)
+                        .buttonStyle(BigButtonStyle(filled: false, color: .white))
+                        .frame(width: 120)
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("\(shots) photos").font(.headline.monospacedDigit())
+                        if session.state == .capturing {
+                            Text("Pass \(passes) of 3").font(.caption.weight(.semibold))
+                        }
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    CoachHelpButton { showingIntro = true }
+                }
+                if session.state == .capturing {
+                    HStack {
+                        PassBandsHUD(completed: completedBands, current: Self.passBands[min(2, passes - 1)])
+                            .frame(width: 86, height: 86)
+                            .padding(8)
+                            .background(.ultraThinMaterial, in: Circle())
+                        Spacer()
                     }
                 }
-                .padding(.horizontal, 14).padding(.vertical, 8)
-                .background(.ultraThinMaterial, in: Capsule())
+                Spacer()
+                actionArea
             }
-            Spacer()
-            if let hint = feedbackText {
-                Text(hint)
-                    .font(.headline)
-                    .padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
-            }
-            actionArea
+            .padding()
         }
-        .padding()
+        .coachIntro(.objectCapture, isPresented: $showingIntro)
+        .task {
+            // Apple's feedback -> coach issues (hysteresis, one cue, double buzz on bad technique).
+            coach.ticksEnabled = false
+            while !Task.isCancelled {
+                if session.state == .capturing && !coach.coach.isScanning { coach.begin() }
+                coach.update(CoachFrame(timestamp: ProcessInfo.processInfo.systemUptime,
+                                        tracking: trackingState, external: externalIssues))
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        .onChange(of: session.numberOfShotsTaken) { old, new in
+            // Geiger tick per kept photo.
+            if new > old, session.state == .capturing { coach.haptics.play(.tick) }
+        }
+        .onChange(of: session.userCompletedScanPass) { _, done in
+            if done { coach.haptics.play(.success) }
+        }
         .confirmationDialog(earlyFinishTitle, isPresented: $confirmEarlyFinish, titleVisibility: .visible) {
             Button("Keep capturing", role: .cancel) {}
             Button("Finish anyway", role: .destructive) { session.finish() }
@@ -280,35 +314,93 @@ struct ObjectCaptureControls: View {
         return "Models line up best after a full circle (3 passes at different heights). Finishing now may produce no model."
     }
 
+    private var completedBands: [Bool] {
+        var done = [false, false, false]
+        let finished = session.userCompletedScanPass ? passes : passes - 1
+        for k in 0..<min(3, max(0, finished)) { done[Self.passBands[k].rawValue] = true }
+        return done
+    }
+
+    private var trackingState: CoachTracking {
+        switch session.cameraTracking {
+        case .normal: return .normal
+        case .notAvailable: return .notAvailable
+        case .limited(let reason):
+            switch reason {
+            case .initializing: return .initializing
+            case .excessiveMotion: return .excessiveMotion
+            case .insufficientFeatures: return .insufficientFeatures
+            case .relocalizing: return .relocalizing
+            @unknown default: return .notAvailable
+            }
+        @unknown default: return .normal
+        }
+    }
+
+    /// Apple's feedback mapped to coach issues (priority + hysteresis are the coach's).
+    private var externalIssues: Set<CoachIssue> {
+        var issues: Set<CoachIssue> = []
+        for item in session.feedback {
+            switch item {
+            case .objectTooClose: issues.insert(.tooClose)
+            case .objectTooFar: issues.insert(.tooFar)
+            case .movingTooFast: issues.insert(.tooFast)
+            case .environmentLowLight, .environmentTooDark: issues.insert(.tooDark)
+            case .outOfFieldOfView: issues.insert(.tracking)
+            default: break
+            }
+        }
+        return issues
+    }
+
+    private var canFlip: Bool { !session.feedback.contains(.objectNotFlippable) }
+
     @ViewBuilder
     private var actionArea: some View {
         switch session.state {
         case .ready:
-            instruction("Point at the object you want to capture. Use good light and a textured surface under it.")
+            instruction("Aim at the object")
             Button("Continue") { _ = session.startDetecting() }
                 .buttonStyle(BigButtonStyle())
         case .detecting:
-            instruction("Adjust the box so it fits the object.")
+            instruction("Fit the box")
             Button("Start capture") { session.startCapturing() }
                 .buttonStyle(BigButtonStyle())
         case .capturing:
             if session.userCompletedScanPass {
-                instruction(passes < 3
-                            ? "Pass \(passes) complete. Do another circle \(passes == 1 ? "lower, aiming up" : "higher, aiming down") for a model that lines up."
-                            : "Pass \(passes) complete. You can finish now.")
-                HStack(spacing: 12) {
-                    Button("Another pass") {
-                        passes += 1
-                        session.beginNewScanPass()
+                if passes < 3 {
+                    // One big cue: the next height.
+                    CoachCue(guidance: .nextBand(Self.passBands[passes], lower: Self.passBands[passes] == .low))
+                }
+                VStack(spacing: 10) {
+                    HStack(spacing: 12) {
+                        if passes < 3 {
+                            Button {
+                                passes += 1
+                                session.beginNewScanPass()
+                            } label: {
+                                Label(passes == 1 ? "Lower pass" : "Higher pass",
+                                      systemImage: passes == 1 ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
+                            }
+                            .buttonStyle(BigButtonStyle())
+                            .accessibilityIdentifier("nextPassButton")
+                        }
+                        Button("Finish") { session.finish() }
+                            .buttonStyle(BigButtonStyle(filled: passes >= 3, color: passes >= 3 ? Theme.accent : .white))
                     }
-                    .buttonStyle(BigButtonStyle(filled: passes < 3, color: passes < 3 ? Theme.accent : .white))
-                    Button("Finish") { session.finish() }
-                        .buttonStyle(BigButtonStyle(filled: passes >= 3, color: passes >= 3 ? Theme.accent : .white))
+                    if canFlip {
+                        Button {
+                            passes = min(3, passes + 1)
+                            flipped = true
+                            session.beginNewScanPassAfterFlip()
+                        } label: {
+                            Label("Flip object (scan the bottom)", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                        .buttonStyle(BigButtonStyle(filled: false, color: .white))
+                        .accessibilityIdentifier("flipObjectButton")
+                    }
                 }
             } else {
-                instruction(shots < ObjectCaptureGuidance.minimumShots
-                            ? "Walk slowly all the way around the object. Keep going until the dial is complete."
-                            : "Keep circling until the dial is complete.")
                 Button(shots < ObjectCaptureGuidance.minimumShots ? "Finish early (\(shots)/\(ObjectCaptureGuidance.minimumShots))" : "Finish now") {
                     confirmEarlyFinish = true
                 }
@@ -329,22 +421,21 @@ struct ObjectCaptureControls: View {
             .shadow(radius: 4)
     }
 
-    private var feedbackText: String? {
-        for item in session.feedback {
-            switch item {
-            case .objectTooClose: return "Move back"
-            case .objectTooFar: return "Move closer"
-            case .movingTooFast: return "Slow down"
-            case .environmentLowLight: return "More light needed"
-            case .environmentTooDark: return "Too dark"
-            case .outOfFieldOfView: return "Aim at the object"
-            case .objectNotFlippable: return "Object can't be flipped"
-            case .overCapturing: return "Enough photos here, keep moving"
-            case .objectNotDetected: return "Object not detected"
-            @unknown default: continue
-            }
-        }
-        return nil
+}
+
+/// 3 concentric rings (low inside, high outside) filled per completed Object Capture pass; the
+/// current pass's ring pulses.
+struct PassBandsHUD: View {
+    let completed: [Bool]
+    let current: CoachBand
+
+    var body: some View {
+        var fill = Array(repeating: Array(repeating: Float(0), count: 12), count: 3)
+        for b in 0..<3 where completed[b] { fill[b] = Array(repeating: 1, count: 12) }
+        let snapshot = CoverageSnapshot(fill: fill, currentBand: nil, currentSector: nil,
+                                        targetBand: completed[current.rawValue] ? nil : current, bandsComplete: completed,
+                                        fraction: Float(completed.filter { $0 }.count) / 3)
+        return CoverageRings(coverage: snapshot, kind: .orbit)
     }
 }
 #endif

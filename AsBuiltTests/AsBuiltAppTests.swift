@@ -243,7 +243,7 @@ final class AsBuiltAppTests: XCTestCase {
         let store = makeStore()
         store.ensureDemoJob()
         let job = try XCTUnwrap(store.job(SampleData.demoJobID))
-        XCTAssertEqual(job.meshCaptures.map(\.id), [SampleData.demoMeshCaptureID])
+        XCTAssertEqual(job.meshCaptures.map(\.id), [SampleData.demoMeshCaptureID, SampleData.demoDetailCaptureID])
         // Launch path: JSON only, no mesh files yet.
         XCTAssertNil(store.modelURL(job: job.id, capture: SampleData.demoMeshCaptureID))
 
@@ -285,7 +285,7 @@ final class AsBuiltAppTests: XCTestCase {
         XCTAssertTrue(makeStore().job(SampleData.demoJobID)?.meshCaptures.isEmpty == true)
         let relaunch = makeStore()
         relaunch.ensureDemoJob()
-        XCTAssertEqual(relaunch.job(SampleData.demoJobID)?.meshCaptures.count, 1)
+        XCTAssertEqual(relaunch.job(SampleData.demoJobID)?.meshCaptures.count, 2)
         XCTAssertEqual(relaunch.job(SampleData.demoJobID)?.roomCaptures.count, 2)
     }
 
@@ -306,5 +306,97 @@ final class AsBuiltAppTests: XCTestCase {
         XCTAssertFalse(e.message.contains("CoreOC"))
         XCTAssertTrue(e.message.contains("line up the photos"))
         XCTAssertTrue(e.technical.contains("processError"))
+    }
+
+    // MARK: Build 6
+
+    func testBuild5JobJSONDecodesWithoutMeasurements() throws {
+        // build4JobJSON has neither `measurements` nor `measureScale` nor coach fields (builds 1-5).
+        let job = try Self.decoder().decode(Job.self, from: Data(Self.build4JobJSON.utf8))
+        XCTAssertTrue(job.measurements.isEmpty)
+        XCTAssertNil(job.measureScale)
+        XCTAssertEqual(job.effectiveMeasureScale, 1)
+        XCTAssertNil(job.captures.first?.coachGrade)
+        XCTAssertFalse(job.captures.contains { $0.isDetailScan })
+    }
+
+    func testMeasurementsAndCalibrationRoundTrip() throws {
+        let store = makeStore()
+        let job = Job(name: "Measure test")
+        store.save(job)
+        let m = PrecisionMeasurement(label: "Header", start: SIMD3(0, 0, 0), end: SIMD3(1.0, 0, 0),
+                                     uncertaintyMeters: 0.002, samples: 24, method: "sceneDepth")
+        store.addMeasurement(m, to: job.id)
+        // Tape says 1.010 m: scale 1.01, raw value kept.
+        XCTAssertTrue(store.calibrate(measurement: m.id, tapeMeters: 1.010, in: job.id))
+        XCTAssertFalse(store.calibrate(measurement: m.id, tapeMeters: 3.0, in: job.id), "implausible tape length rejected")
+        let reloaded = try XCTUnwrap(makeStore().job(job.id))
+        XCTAssertEqual(reloaded.measurements.count, 1)
+        XCTAssertEqual(reloaded.measureScale ?? 0, 1.01, accuracy: 1e-9)
+        XCTAssertEqual(reloaded.measurements[0].rawMeters, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(reloaded.measurements[0].tapeMeters ?? 0, 1.010, accuracy: 1e-9)
+        XCTAssertEqual(reloaded.measurements[0].calibratedMeters(scale: reloaded.measureScale), 1.01, accuracy: 1e-6)
+        store.deleteMeasurement(m.id, in: job.id)
+        XCTAssertNil(makeStore().job(job.id)?.measureScale, "calibration goes with its measurement")
+    }
+
+    func testJobZipContainsMeasurementsCSV() async throws {
+        let store = makeStore()
+        store.ensureDemoJob()
+        let job = try XCTUnwrap(store.job(SampleData.demoJobID))
+        XCTAssertFalse(job.measurements.isEmpty)
+        let zip = try store.makeJobZip(job.id)
+        let data = try Data(contentsOf: zip)
+        XCTAssertEqual(Array(data.prefix(4)), [0x50, 0x4B, 0x03, 0x04])
+        XCTAssertNotNil(data.range(of: Data(PrecisionMeasurementsCSV.fileName.utf8)))
+    }
+
+    func testDemoDetailScanIsRealFusionWithColoredExports() async throws {
+        let store = makeStore()
+        store.ensureDemoJob()
+        await store.prepareDemoExports()
+        XCTAssertEqual(store.demoStatus, .ready)
+        let id = SampleData.demoDetailCaptureID
+        let capture = try XCTUnwrap(store.capture(job: SampleData.demoJobID, capture: id))
+        XCTAssertTrue(capture.isDetailScan)
+        let names = Set(store.files(job: SampleData.demoJobID, capture: id).map(\.lastPathComponent))
+        for expected in [CaptureFile.modelUSDZ, CaptureFile.meshOBJ, CaptureFile.meshPLY, CaptureFile.meshCSV, CaptureFile.coachReport] {
+            XCTAssertTrue(names.contains(expected), "missing \(expected), have \(names)")
+        }
+        let dir = store.captureDirectory(job: SampleData.demoJobID, capture: id)
+        let ply = try Data(contentsOf: dir.appendingPathComponent(CaptureFile.meshPLY))
+        XCTAssertNotNil(ply.range(of: Data("property uchar red".utf8)), "PLY carries vertex colors")
+        let url = try XCTUnwrap(store.modelURL(job: SampleData.demoJobID, capture: id))
+        let scene = try SCNScene(url: url, options: [.checkConsistency: false])
+        var geometryNodes = 0
+        scene.rootNode.enumerateHierarchy { node, _ in if node.geometry != nil { geometryNodes += 1 } }
+        XCTAssertGreaterThanOrEqual(geometryNodes, 1)
+        XCTAssertEqual(Router.initialPath(for: "detail").count, 2)
+        XCTAssertEqual(Router.initialPath(for: "measurements").count, 2)
+        XCTAssertEqual(Router.initialPath(for: "coach-grade").count, 1)
+    }
+
+    func testDetailStageCrashLoopBreaker() async throws {
+        defaults.set(JobStore.DemoStage.detail.rawValue, forKey: JobStore.demoInFlightKey)
+        let store = makeStore()
+        store.ensureDemoJob()
+        await store.prepareDemoExports()
+        XCTAssertNotNil(store.demoNotice)
+        XCTAssertNil(store.modelURL(job: SampleData.demoJobID, capture: SampleData.demoDetailCaptureID))
+        XCTAssertNotNil(store.modelURL(job: SampleData.demoJobID, capture: SampleData.demoMeshCaptureID))
+    }
+
+    func testPhotoZipStreamsImages() throws {
+        let dir = root.appendingPathComponent("oc", isDirectory: true)
+        let images = dir.appendingPathComponent(CaptureFile.images, isDirectory: true)
+        try FileManager.default.createDirectory(at: images, withIntermediateDirectories: true)
+        for k in 0..<3 {
+            try Data(repeating: UInt8(k), count: 200_000 + k).write(to: images.appendingPathComponent("IMG_\(k).HEIC"))
+        }
+        let zip = try ExportService.makePhotoZip(captureDirectory: dir, title: "Valve")
+        let data = try Data(contentsOf: zip)
+        XCTAssertEqual(Array(data.prefix(4)), [0x50, 0x4B, 0x03, 0x04])
+        XCTAssertNotNil(data.range(of: Data("Valve-photos/Images/IMG_2.HEIC".utf8)))
+        XCTAssertGreaterThan(data.count, 600_000)
     }
 }

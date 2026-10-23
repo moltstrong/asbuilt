@@ -337,6 +337,10 @@ struct FilesTabView: View {
                 }
                 .card()
 
+                if capture.origin == .objectCapture, (capture.imageCount ?? 0) > 0 {
+                    PhotoExportCard(jobID: jobID, capture: capture)
+                }
+
                 SectionHeader(title: "Files (\(files.count))", systemImage: "folder")
                 VStack(spacing: 0) {
                     ForEach(files, id: \.self) { url in
@@ -421,4 +425,82 @@ struct FileRow: View {
         let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
+}
+
+/// "Export photos for full-detail Mac build": streams the Images folder (+ log) into a STORE zip
+/// off the main thread, then offers the share sheet (AirDrop, Files, iCloud Drive).
+struct PhotoExportCard: View {
+    let jobID: UUID
+    let capture: Capture
+
+    @EnvironmentObject private var store: JobStore
+    @State private var progress: Double?
+    @State private var zipURL: URL?
+    @State private var errorText: String?
+    @State private var sharing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Full-detail Mac build").font(.headline)
+            Text("The phone builds Apple's reduced detail. Send all \(capture.imageCount ?? 0) photos to a Mac (Reality Composer Pro or PhotogrammetrySession, detail Full/Raw) for about 1 mm detail on small textured objects.")
+                .font(.subheadline).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let progress {
+                ProgressView(value: progress) { Text("Packing photos… \(Int(progress * 100))%").font(.caption) }
+            } else {
+                Button {
+                    export()
+                } label: {
+                    Label("Export photos for full-detail Mac build", systemImage: "photo.stack")
+                }
+                .buttonStyle(BigButtonStyle(filled: false))
+                .accessibilityIdentifier("exportPhotosButton")
+            }
+            if let errorText {
+                Text(errorText).font(.footnote).foregroundStyle(Theme.bad)
+            }
+        }
+        .card()
+        .sheet(isPresented: $sharing) {
+            if let zipURL { ActivityShareSheet(items: [zipURL]) }
+        }
+    }
+
+    private func export() {
+        errorText = nil
+        progress = 0
+        let dir = store.captureDirectory(job: jobID, capture: capture.id)
+        let title = capture.title
+        Task {
+            let result: Result<URL, Error> = await Task.detached(priority: .userInitiated) {
+                do {
+                    let url = try ExportService.makePhotoZip(captureDirectory: dir, title: title) { p in
+                        Task { @MainActor in if progress != nil { progress = p } }
+                    }
+                    return .success(url)
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+            progress = nil
+            switch result {
+            case .success(let url):
+                zipURL = url
+                sharing = true
+            case .failure(let error):
+                errorText = "Could not pack the photos: \(error.localizedDescription)"
+            }
+        }
+    }
+}
+
+/// UIActivityViewController wrapper (AirDrop, Save to Files, iCloud Drive) for large files.
+struct ActivityShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

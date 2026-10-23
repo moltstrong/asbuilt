@@ -39,6 +39,14 @@ shoot 09-capabilities -AsBuiltScreen capabilities
 SHOT_DELAY=8 shoot 10-mesh-3d -AsBuiltScreen mesh
 shoot 11-mesh-files -AsBuiltScreen mesh-files
 SHOT_DELAY=10 shoot 12-mesh-quicklook -AsBuiltScreen mesh-quicklook
+# Build 6: Detail scan (TSDF fusion demo), Measure list, Capture Coach HUD preview + grade card.
+SHOT_DELAY=10 shoot 13-detail-3d -AsBuiltScreen detail
+shoot 14-measurements -AsBuiltScreen measurements
+shoot 15-coach-hud -AsBuiltScreen coach
+shoot 16-coach-fast -AsBuiltScreen coach-fast
+shoot 17-coach-far -AsBuiltScreen coach-far
+shoot 18-coach-band -AsBuiltScreen coach-band
+shoot 19-coach-grade -AsBuiltScreen coach-grade
 
 # Copy the files the app generated for the demo job, as proof that exports work in the Simulator.
 DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data)

@@ -43,6 +43,10 @@ struct RootView: View {
                         CapabilitiesView()
                     case .settings:
                         SettingsView()
+                    case .measurements(let jobID):
+                        MeasurementsView(jobID: jobID)
+                    case .coachPreview(let name):
+                        CoachPreviewView(scenario: CoachDemo.Scenario(rawValue: name) ?? .midScan)
                     }
                 }
         }

@@ -15,11 +15,18 @@ struct RoomScanView: View {
     @State private var roomName = ""
     @State private var saving = false
     @State private var errorText: String?
+    @StateObject private var coach = CoachDriver(mode: .room)
+    @State private var showingIntro = false
 
     var body: some View {
         ZStack {
             RoomCaptureRepresentable(model: model)
                 .ignoresSafeArea()
+            if model.phase == .scanning {
+                // RoomPlan's instructions on the shared coach overlay: one cue, double buzz on problems.
+                CoachOverlay(output: coach.output, thresholds: coach.thresholds, showsReticle: false, showsSpeed: false,
+                             showsRings: false, isScanning: true, problemsOnly: true)
+            }
 
             VStack {
                 HStack {
@@ -30,6 +37,7 @@ struct RoomScanView: View {
                     .buttonStyle(BigButtonStyle(filled: false, color: .white))
                     .frame(width: 120)
                     Spacer()
+                    CoachHelpButton { showingIntro = true }
                     if model.phase == .scanning {
                         Button("Done") { model.finish() }
                             .buttonStyle(BigButtonStyle())
@@ -38,13 +46,6 @@ struct RoomScanView: View {
                 }
                 .padding()
                 Spacer()
-                if let hint = model.instruction, model.phase == .scanning {
-                    Text(hint)
-                        .font(.headline)
-                        .padding()
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .padding(.bottom, 40)
-                }
                 if model.phase == .processing {
                     ProgressView("Building room model…")
                         .padding()
@@ -75,6 +76,18 @@ struct RoomScanView: View {
             }
         }
         .statusBarHidden()
+        .coachIntro(.room, isPresented: $showingIntro)
+        .task {
+            // No torch here: RoomPlan owns its camera session (auto torch only in the ARKit modes).
+            coach.ticksEnabled = false
+            coach.begin()
+            while !Task.isCancelled {
+                if model.phase == .scanning {
+                    coach.update(CoachFrame(timestamp: ProcessInfo.processInfo.systemUptime, external: model.coachIssues))
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
     }
 
     private func save() {
@@ -136,6 +149,8 @@ final class RoomScanModel: ObservableObject {
 
     @Published var phase: Phase = .scanning
     @Published var instruction: String?
+    /// RoomPlan's current instruction as coach issues.
+    @Published var coachIssues: Set<CoachIssue> = []
     var finalRoom: CapturedRoom?
     var rawData: CapturedRoomData?
     weak var captureView: RoomCaptureView?
@@ -147,6 +162,20 @@ final class RoomScanModel: ObservableObject {
 
     func cancel() {
         captureView?.captureSession.stop()
+    }
+
+    /// moveCloseToWall -> tooFar ("Closer"), moveAwayFromWall -> tooClose ("Back up"), slowDown -> tooFast,
+    /// turnOnLight -> tooDark ("More light"), lowTexture -> lowTexture ("Shiny or plain").
+    nonisolated static func issues(for instruction: RoomCaptureSession.Instruction) -> Set<CoachIssue> {
+        switch instruction {
+        case .moveCloseToWall: return [.tooFar]
+        case .moveAwayFromWall: return [.tooClose]
+        case .slowDown: return [.tooFast]
+        case .turnOnLight: return [.tooDark]
+        case .lowTexture: return [.lowTexture]
+        case .normal: return []
+        @unknown default: return []
+        }
     }
 
     func text(for instruction: RoomCaptureSession.Instruction) -> String? {
@@ -230,7 +259,10 @@ final class RoomCaptureViewController: UIViewController, RoomCaptureViewDelegate
     // MARK: RoomCaptureSessionDelegate
 
     func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
-        Task { @MainActor in self.model.instruction = self.model.text(for: instruction) }
+        Task { @MainActor in
+            self.model.instruction = self.model.text(for: instruction)
+            self.model.coachIssues = RoomScanModel.issues(for: instruction)
+        }
     }
 
     func captureSession(_ session: RoomCaptureSession, didEndWith data: CapturedRoomData, error: Error?) {

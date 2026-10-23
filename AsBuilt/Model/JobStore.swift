@@ -137,6 +137,83 @@ final class JobStore: ObservableObject {
         save(job)
     }
 
+    // MARK: Measure tool
+
+    func addMeasurement(_ m: PrecisionMeasurement, to jobID: UUID) {
+        guard var job = job(jobID) else { return }
+        job.measurements.append(m)
+        save(job)
+    }
+
+    func deleteMeasurement(_ id: UUID, in jobID: UUID) {
+        guard var job = job(jobID) else { return }
+        job.measurements.removeAll { $0.id == id }
+        if !job.measurements.contains(where: { $0.tapeMeters != nil }) { job.measureScale = nil }
+        save(job)
+    }
+
+    func renameMeasurement(_ id: UUID, label: String, in jobID: UUID) {
+        guard var job = job(jobID), let i = job.measurements.firstIndex(where: { $0.id == id }) else { return }
+        job.measurements[i].label = label
+        save(job)
+    }
+
+    /// "Calibrate with tape": the true length of a saved measurement sets the job's scale factor.
+    /// Returns false when the tape length is implausible (scale outside 0.8...1.25).
+    @discardableResult
+    func calibrate(measurement id: UUID, tapeMeters: Double, in jobID: UUID) -> Bool {
+        guard var job = job(jobID), let i = job.measurements.firstIndex(where: { $0.id == id }),
+              let scale = PrecisionMeasurement.calibrationScale(rawMeters: job.measurements[i].rawMeters, tapeMeters: tapeMeters)
+        else { return false }
+        for k in job.measurements.indices { job.measurements[k].tapeMeters = nil }
+        job.measurements[i].tapeMeters = tapeMeters
+        job.measureScale = scale
+        save(job)
+        return true
+    }
+
+    func clearCalibration(in jobID: UUID) {
+        guard var job = job(jobID) else { return }
+        for k in job.measurements.indices { job.measurements[k].tapeMeters = nil }
+        job.measureScale = nil
+        save(job)
+    }
+
+    /// Job-level ZIP: measurements.csv plus every capture folder (share-all from the job screen).
+    func makeJobZip(_ jobID: UUID) throws -> URL {
+        guard let job = job(jobID) else { throw CocoaError(.fileNoSuchFile) }
+        let staging = fm.temporaryDirectory.appendingPathComponent("JobStaging-\(job.id.uuidString)", isDirectory: true)
+        try? fm.removeItem(at: staging)
+        try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+        var files: [URL] = []
+        if !job.measurements.isEmpty {
+            let csv = staging.appendingPathComponent(PrecisionMeasurementsCSV.fileName)
+            let text = PrecisionMeasurementsCSV.write(job.measurements, scale: job.measureScale, units: Preferences.units,
+                                                      jobName: job.name)
+            try Data(text.utf8).write(to: csv, options: .atomic)
+            files.append(csv)
+        }
+        for capture in job.captures {
+            let src = captureDirectory(job: job.id, capture: capture.id)
+            guard fm.fileExists(atPath: src.path) else { continue }
+            // Folder per capture, named by title (photos/checkpoints stay out: use Export photos for those).
+            let named = staging.appendingPathComponent(ExportService.safeFileName(capture.title) + "-" + capture.id.uuidString.prefix(4),
+                                                       isDirectory: true)
+            try fm.createDirectory(at: named, withIntermediateDirectories: true)
+            for url in (try? fm.contentsOfDirectory(at: src, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? [] {
+                if [CaptureFile.images, CaptureFile.checkpoint].contains(url.lastPathComponent) { continue }
+                try? fm.linkItem(at: url, to: named.appendingPathComponent(url.lastPathComponent))
+                if !fm.fileExists(atPath: named.appendingPathComponent(url.lastPathComponent).path) {
+                    try? fm.copyItem(at: url, to: named.appendingPathComponent(url.lastPathComponent))
+                }
+            }
+            files.append(named)
+        }
+        let url = try ExportService.makeZip(files: files, archiveName: job.name, folderName: ExportService.safeFileName(job.name))
+        try? fm.removeItem(at: staging)
+        return url
+    }
+
     // MARK: Plans and files
 
     func plan(job jobID: UUID, capture captureID: UUID) -> FloorPlan? {
@@ -164,7 +241,7 @@ final class JobStore: ObservableObject {
                                                 options: [.skipsHiddenFiles])) ?? []
         let order = [CaptureFile.roomUSDZ, CaptureFile.modelUSDZ, CaptureFile.meshOBJ, CaptureFile.meshMTL, CaptureFile.meshPLY,
                      CaptureFile.meshCSV, CaptureFile.dxf, CaptureFile.pdf, CaptureFile.csv, CaptureFile.svg,
-                     CaptureFile.reconstructionLog, CaptureFile.roomJSON, CaptureFile.planJSON, CaptureFile.scanInfo,
+                     CaptureFile.reconstructionLog, CaptureFile.coachReport, CaptureFile.roomJSON, CaptureFile.planJSON, CaptureFile.scanInfo,
                      CaptureFile.images, CaptureFile.checkpoint]
         return urls
             .filter { !$0.lastPathComponent.hasPrefix(".") }
@@ -238,6 +315,7 @@ final class JobStore: ObservableObject {
         case model = "3D model"
         case pdf = "PDF"
         case mesh = "LiDAR mesh"
+        case detail = "Detail scan"
     }
 
     private var skippedDemoStages: Set<DemoStage> {
@@ -263,12 +341,27 @@ final class JobStore: ObservableObject {
         let meshCapture = Capture(id: SampleData.demoMeshCaptureID, kind: .mesh, origin: .sample, title: "Bedroom 2 LiDAR mesh",
                                   createdAt: created.addingTimeInterval(3600),
                                   notes: "Sample LiDAR Mesh scan of Bedroom 2 (generated): walls, floor, ceiling, door, windows, furniture and a water heater.")
+        let detailCapture = Capture(id: SampleData.demoDetailCaptureID, kind: .mesh, origin: .sample,
+                                    title: "Panel box + valve (Detail scan)", createdAt: created.addingTimeInterval(5400),
+                                    notes: "Sample Detail scan (generated by running AsBuilt's 4 mm LiDAR depth fusion on synthetic depth maps): 4\" electrical box with receptacle, EMT conduit, copper line with a ball valve.",
+                                    coachGrade: "A", coachFix: nil)
         if var existing = job(id), samples.allSatisfy({ plan(job: id, capture: $0.0) != nil }) {
-            // Demo jobs created by builds <= 4 have no LiDAR mesh sample yet: add it (JSON only).
+            // Demo jobs created by older builds lack the newer samples: add them (JSON only).
+            var changed = false
             if !existing.captures.contains(where: { $0.id == SampleData.demoMeshCaptureID }) {
                 existing.captures.append(meshCapture)
-                save(existing, touch: false)
+                changed = true
             }
+            if !existing.captures.contains(where: { $0.id == SampleData.demoDetailCaptureID }) {
+                existing.captures.append(detailCapture)
+                changed = true
+            }
+            if existing.measurements.isEmpty {
+                existing.measurements = SampleData.demoMeasurements()
+                existing.measureScale = SampleData.demoMeasureScale
+                changed = true
+            }
+            if changed { save(existing, touch: false) }
             return
         }
         let bedroom = Capture(id: SampleData.demoCaptureID, kind: .room, origin: .sample, title: "Bedroom 2",
@@ -279,7 +372,8 @@ final class JobStore: ObservableObject {
                               notes: "Sample room: 11' x 13', 9' ceiling. Base cabinets, sink, dishwasher, range, fridge.")
         let job = Job(id: id, name: "Demo: 412 Alder St Remodel", address: "412 Alder St, Portland, OR 97205",
                       client: "Sample Homeowner", notes: "Demo job with sample rooms. Works in the Simulator and on any iPhone.",
-                      createdAt: created, updatedAt: created, isDemo: true, captures: [bedroom, kitchen, meshCapture])
+                      createdAt: created, updatedAt: created, isDemo: true, captures: [bedroom, kitchen, meshCapture, detailCapture],
+                      measurements: SampleData.demoMeasurements(), measureScale: SampleData.demoMeasureScale)
         save(job, touch: false)
         for (captureID, plan) in samples {
             do {
@@ -304,9 +398,10 @@ final class JobStore: ObservableObject {
         case .cad: names = [CaptureFile.dxf, CaptureFile.svg, CaptureFile.csv]
         case .model: names = [CaptureFile.modelUSDZ]
         case .pdf: names = [CaptureFile.pdf]
-        case .mesh:
+        case .mesh, .detail:
+            let target = stage == .mesh ? SampleData.demoMeshCaptureID : SampleData.demoDetailCaptureID
             return job.meshCaptures.filter { capture in
-                guard capture.id == SampleData.demoMeshCaptureID else { return false }
+                guard capture.id == target else { return false }
                 let dir = captureDirectory(job: job.id, capture: capture.id)
                 if !Self.isCurrentRoomModel(dir.appendingPathComponent(CaptureFile.modelUSDZ)) { return true }
                 return [CaptureFile.meshOBJ, CaptureFile.meshMTL, CaptureFile.meshCSV, CaptureFile.scanInfo]
@@ -373,11 +468,13 @@ final class JobStore: ObservableObject {
             defaults.set(stage.rawValue, forKey: Self.demoInFlightKey)
             for capture in demoCaptures(missing: stage) {
                 let dir = captureDirectory(job: job.id, capture: capture.id)
-                if stage == .mesh {
+                if stage == .mesh || stage == .detail {
                     let title = capture.title
                     do {
                         let measurements = try await Task.detached(priority: .utility) {
-                            try ExportService.writeDemoMeshScan(to: dir, title: title, units: units)
+                            stage == .mesh
+                                ? try ExportService.writeDemoMeshScan(to: dir, title: title, units: units)
+                                : try ExportService.writeDemoDetailScan(to: dir, title: title, units: units)
                         }.value
                         if var updated = self.capture(job: job.id, capture: capture.id),
                            var current = self.job(job.id), let index = current.captures.firstIndex(where: { $0.id == capture.id }) {
@@ -406,7 +503,7 @@ final class JobStore: ObservableObject {
                     case .pdf:
                         // UIKit drawing: stays on the main actor, but after the first frame.
                         try ExportService.writePDF(plan: plan, to: dir, context: context, units: units, options: options)
-                    case .mesh:
+                    case .mesh, .detail:
                         break
                     }
                 } catch {

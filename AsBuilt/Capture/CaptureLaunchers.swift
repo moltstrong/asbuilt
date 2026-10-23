@@ -29,17 +29,80 @@ struct ObjectCaptureLauncher: View {
     }
 }
 
-/// LiDAR Mesh scan (ARKit scene reconstruction, no photogrammetry).
+/// LiDAR scan screen with a Room / Detail mode picker: Room = ARKit scene mesh (a few cm),
+/// Detail = TSDF fusion of the LiDAR depth maps (4 mm voxels within 1.5 m).
 struct MeshScanLauncher: View {
     let jobID: UUID
+    var initialMode: LiDARScanMode? = nil
     var onFinished: (UUID?) -> Void
+
+    @AppStorage("lidarScanMode") private var modeRaw = LiDARScanMode.room.rawValue
 
     var body: some View {
         #if os(iOS) && !targetEnvironment(simulator)
-        LiDARMeshScanView(jobID: jobID, onFinished: onFinished)
+        let mode = LiDARScanMode(rawValue: modeRaw) ?? .room
+        Group {
+            switch mode {
+            case .room:
+                LiDARMeshScanView(jobID: jobID, modePicker: AnyView(LiDARModePicker(modeRaw: $modeRaw)), onFinished: onFinished)
+            case .detail:
+                DetailScanView(jobID: jobID, modePicker: AnyView(LiDARModePicker(modeRaw: $modeRaw)), onFinished: onFinished)
+            }
+        }
+        .id(mode)
+        .onAppear { if let initialMode { modeRaw = initialMode.rawValue } }
         #else
         UnsupportedCaptureView(kind: .mesh, message: DeviceCapabilitiesSnapshot.meshMessage)
         #endif
+    }
+}
+
+enum LiDARScanMode: String, CaseIterable, Identifiable {
+    case room
+    case detail
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .room: return "Room"
+        case .detail: return "Detail"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .room: return "Spaces · few cm"
+        case .detail: return "Within 1 m · 3-5 mm"
+        }
+    }
+}
+
+/// Room / Detail segmented picker shown on the LiDAR scan screen before Start.
+struct LiDARModePicker: View {
+    @Binding var modeRaw: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(LiDARScanMode.allCases) { mode in
+                let selected = modeRaw == mode.rawValue
+                Button {
+                    modeRaw = mode.rawValue
+                } label: {
+                    VStack(spacing: 2) {
+                        Text(mode.title).font(.headline)
+                        Text(mode.subtitle).font(.caption2.weight(.semibold)).opacity(0.85)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .foregroundStyle(selected ? Color.black : Color.white)
+                    .background(selected ? Color.white : Color.white.opacity(0.15), in: RoundedRectangle(cornerRadius: 12))
+                }
+                .accessibilityIdentifier("lidarMode-\(mode.rawValue)")
+            }
+        }
+        .padding(4)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 15))
+        .frame(maxWidth: 420)
     }
 }
 

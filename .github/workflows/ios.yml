@@ -72,6 +72,14 @@ jobs:
           done
           head -5 mesh/demo-mesh.obj
           cat mesh/demo-measurements.csv
+          # Detail scan: real TSDF fusion output with per-vertex colors (primvars:displayColor).
+          f=detail/detail-scan.usdz
+          echo "== $f"
+          test -s "$f"
+          usdchecker --arkit "$f" 2>&1 | grep -v "RegisterBehaviorForPrimTypeId" | tee "$f.check.txt"
+          grep -q "^Success!" "$f.check.txt"
+          usdcat "$f" | grep -c "primvars:displayColor"
+          head -12 detail/detail-mesh.obj
 
       - name: Install XcodeGen and generate project
         run: |
@@ -365,7 +373,7 @@ jobs:
         run: |
           set -o pipefail
           : > usdchecker-ios27.txt
-          for f in artifacts/screenshots-ios27/model.usdz artifacts/screenshots-ios27/mesh-model.usdz; do
+          for f in artifacts/screenshots-ios27/model.usdz artifacts/screenshots-ios27/mesh-model.usdz artifacts/screenshots-ios27/detail-model.usdz; do
             echo "== $f" | tee -a usdchecker-ios27.txt
             test -s "$f"
             usdchecker --arkit "$f" 2>&1 | grep -v "RegisterBehaviorForPrimTypeId" | tee "$f.check.txt"

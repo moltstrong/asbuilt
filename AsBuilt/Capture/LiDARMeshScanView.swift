@@ -10,14 +10,19 @@ import RealityKit
 /// mesh off the main thread and exported as model.usdz, mesh.obj/.mtl, mesh.ply and measurements.csv.
 struct LiDARMeshScanView: View {
     let jobID: UUID
+    var modePicker: AnyView = AnyView(EmptyView())
     var onFinished: (UUID?) -> Void
 
     @EnvironmentObject private var store: JobStore
     @Environment(\.dismiss) private var dismiss
     @AppStorage(Preferences.unitsKey) private var unitsRaw = UnitSystem.imperial.rawValue
     @StateObject private var model = MeshScanModel()
+    @StateObject private var coach = CoachDriver(mode: .mesh)
     @State private var captureID = UUID()
     @State private var name = ""
+    @State private var showingIntro = false
+    @State private var report: CoachReport?
+    @State private var showGrade = false
 
     private var units: UnitSystem { UnitSystem(rawValue: unitsRaw) ?? .imperial }
 
@@ -28,23 +33,50 @@ struct LiDARMeshScanView: View {
                 MeshARViewContainer(model: model)
                     .ignoresSafeArea()
             }
+            if model.phase.isLive || model.phase == .ready {
+                CoachOverlay(output: coach.output, thresholds: coach.thresholds,
+                             showsRings: model.phase.isLive, highlightGaps: coach.isFillingGaps,
+                             isScanning: model.phase == .scanning)
+            }
             VStack(spacing: 12) {
                 topBar
-                if let hint = model.hint, model.phase.isLive {
-                    Text(hint)
-                        .font(.headline)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 16).padding(.vertical, 10)
-                        .background(.ultraThinMaterial, in: Capsule())
-                }
                 Spacer()
                 bottomArea
             }
             .padding()
+            if showGrade, let report {
+                Color.black.opacity(0.35).ignoresSafeArea()
+                GradeCard(report: report, onFillGaps: report.coverageFraction < 0.999 ? { fillGaps() } : nil) {
+                    showGrade = false
+                    model.stopAndProcess(directory: captureDirectory, title: titleForExport, units: units,
+                                         coachReport: CoachReportText.text(report, mode: .mesh))
+                }
+                .padding()
+            }
         }
         .statusBarHidden()
-        .onAppear { model.prepare() }
-        .onDisappear { model.tearDown() }
+        .coachIntro(.mesh, isPresented: $showingIntro)
+        .onAppear {
+            coach.onTorch = { on in ARTorch.set(on) }
+            model.onCoachFrame = { [weak coach] frame in coach?.update(frame) }
+            model.prepare()
+        }
+        .onDisappear {
+            coach.setTorch(false)
+            model.tearDown()
+        }
+    }
+
+    private func stop() {
+        model.isCoachPaused = true
+        report = coach.finish()
+        showGrade = true
+    }
+
+    private func fillGaps() {
+        showGrade = false
+        model.isCoachPaused = false
+        coach.resumeForGaps()
     }
 
     private var topBar: some View {
@@ -68,6 +100,7 @@ struct LiDARMeshScanView: View {
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
                 .accessibilityIdentifier("meshStats")
             }
+            CoachHelpButton { showingIntro = true }
         }
     }
 
@@ -83,26 +116,28 @@ struct LiDARMeshScanView: View {
             }
         case .ready:
             VStack(spacing: 10) {
-                instruction("Point at the space or object. Tap Start, then sweep slowly over every surface from 0.5-3 m away.")
-                Button {
+                modePicker
+                ReadyStartButton(isReady: coach.output?.isReady ?? false, title: "Start scan") {
+                    coach.begin()
                     model.startScanning()
-                } label: {
-                    Label("Start scan", systemImage: "record.circle")
                 }
-                .buttonStyle(BigButtonStyle())
             }
         case .scanning, .interrupted:
             VStack(spacing: 10) {
-                instruction("Move slowly. Cover tops, sides and undersides. The colored mesh shows what's captured.")
+                if coach.output?.suggestFinish == true {
+                    FinishPrompt(onFinish: { stop() }, onKeepGoing: { coach.dismissFinish() })
+                }
                 HStack(spacing: 12) {
                     Button {
+                        coach.reset()
+                        coach.begin()
                         model.reset()
                     } label: {
                         Label("Reset", systemImage: "arrow.counterclockwise")
                     }
                     .buttonStyle(BigButtonStyle(filled: false, color: .white))
                     Button {
-                        model.stopAndProcess(directory: captureDirectory, title: titleForExport, units: units)
+                        stop()
                     } label: {
                         Label("Stop", systemImage: "stop.circle.fill")
                     }
@@ -133,6 +168,9 @@ struct LiDARMeshScanView: View {
                 Button("Discard and scan again") {
                     try? FileManager.default.removeItem(at: captureDirectory)
                     captureID = UUID()
+                    coach.reset()
+                    coach.begin()
+                    report = nil
                     model.reset()
                 }
                 .buttonStyle(BigButtonStyle(filled: false))
@@ -177,7 +215,7 @@ struct LiDARMeshScanView: View {
     private func save(_ m: MeshMeasurements) {
         let capture = Capture(id: captureID, kind: .mesh, origin: .lidarMesh, title: titleForExport,
                               notes: "LiDAR Mesh scan: \(m.dimensionsText(.metric)) (W × D × H), \(m.triangleCount) triangles.",
-                              measurements: m)
+                              measurements: m, coachGrade: report?.grade.rawValue, coachFix: report?.fix)
         store.addCapture(capture, to: jobID)
         model.tearDown()
         onFinished(captureID)
@@ -232,6 +270,12 @@ final class MeshScanModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var progress = 0.0
     @Published private(set) var progressText = ""
     @Published private(set) var canRestart = true
+    /// Set by the view: receives each frame's coach metrics (main queue).
+    var onCoachFrame: (@MainActor (CoachFrame) -> CoachOutput?)?
+    /// True while the grade card is up (stats stop advancing).
+    var isCoachPaused = false
+    /// Last coach verdict: stats (the visible progress) only advance while technique is good.
+    private var coachAllowsProgress = true
 
     let isSupported = ARWorldTrackingConfiguration.isSupported && ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
     private weak var arView: ARView?
@@ -256,16 +300,30 @@ final class MeshScanModel: NSObject, ObservableObject, ARSessionDelegate {
     func prepare() {
         guard isSupported, let view = arView, phase == .ready, !previewRunning else { return }
         previewRunning = true
+        view.session.run(Self.previewConfiguration())
+        hint = nil
+    }
+
+    /// Pre-flight: tracking, light estimate and LiDAR depth for the coach (no reconstruction yet).
+    static func previewConfiguration() -> ARWorldTrackingConfiguration {
         let configuration = ARWorldTrackingConfiguration()
         configuration.worldAlignment = .gravity
-        view.session.run(configuration)
-        hint = "Tap Start when the camera view is steady."
+        configuration.isLightEstimationEnabled = true
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
+        return configuration
     }
 
     static func scanConfiguration() -> ARWorldTrackingConfiguration {
         let configuration = ARWorldTrackingConfiguration()
         configuration.worldAlignment = .gravity
         configuration.environmentTexturing = .none
+        configuration.isLightEstimationEnabled = true
+        // Depth for the coach's distance / confidence metrics (not used for the mesh itself).
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
         if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
             configuration.sceneReconstruction = .meshWithClassification
         } else {
@@ -277,6 +335,7 @@ final class MeshScanModel: NSObject, ObservableObject, ARSessionDelegate {
     func startScanning() {
         guard isSupported, let view = arView else { return }
         clearStats()
+        isCoachPaused = false
         view.session.run(Self.scanConfiguration(), options: [.resetTracking, .removeExistingAnchors])
         phase = .scanning
         hint = nil
@@ -297,6 +356,7 @@ final class MeshScanModel: NSObject, ObservableObject, ARSessionDelegate {
     func tearDown() {
         processingTask?.cancel()
         processingTask = nil
+        ARTorch.set(false)
         arView?.session.pause()
         UIApplication.shared.isIdleTimerDisabled = false
     }
@@ -312,8 +372,9 @@ final class MeshScanModel: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: Processing
 
-    func stopAndProcess(directory: URL, title: String, units: UnitSystem) {
+    func stopAndProcess(directory: URL, title: String, units: UnitSystem, coachReport: String? = nil) {
         guard phase.isLive, let session = arView?.session else { return }
+        ARTorch.set(false)
         // Latest anchors: what the delegate saw plus the current frame's (they're the same objects
         // normally; the frame wins).
         var anchors = meshAnchors
@@ -359,6 +420,9 @@ final class MeshScanModel: NSObject, ObservableObject, ARSessionDelegate {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 for file in output.files {
                     try file.data.write(to: directory.appendingPathComponent(file.name), options: .atomic)
+                }
+                if let coachReport {
+                    try? Data(coachReport.utf8).write(to: directory.appendingPathComponent(CaptureFile.coachReport), options: .atomic)
                 }
                 report(1, "Done")
                 result = .success(output.measurements)
@@ -452,6 +516,8 @@ final class MeshScanModel: NSObject, ObservableObject, ARSessionDelegate {
 
     private func updateStats(force: Bool = false) {
         let now = Date()
+        // Visible progress freezes while the coach flags bad technique (users self-correct).
+        guard force || (coachAllowsProgress && !isCoachPaused) else { return }
         guard force || now.timeIntervalSince(lastStats) > 0.5 else { return }
         lastStats = now
         var triangles = 0
@@ -474,6 +540,13 @@ final class MeshScanModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     // MARK: ARSessionDelegate
+
+    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // Only plain values leave this method; the ARFrame is never stored.
+        let coachFrame = ARFrameCopy.coachFrame(frame)
+        let output = ARFrameCopy.onMain { onCoachFrame?(coachFrame) } ?? nil
+        coachAllowsProgress = output?.shouldIntegrate ?? true
+    }
 
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         guard phase.isLive else { return }
@@ -499,7 +572,7 @@ final class MeshScanModel: NSObject, ObservableObject, ARSessionDelegate {
     func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
         switch camera.trackingState {
         case .normal:
-            hint = phase == .ready ? "Tap Start when the camera view is steady." : nil
+            hint = nil
         case .notAvailable:
             hint = "Tracking unavailable"
         case .limited(let reason):

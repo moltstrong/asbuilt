@@ -11,6 +11,10 @@ struct JobDetailView: View {
     @State private var showingRoomScan = false
     @State private var showingObjectCapture = false
     @State private var showingMeshScan = false
+    @State private var meshScanMode: LiDARScanMode = .room
+    @State private var showingMeasure = false
+    @State private var jobZipURL: URL?
+    @State private var jobZipError: String?
     @State private var showingImporter = false
     @State private var showingEditor = false
     @State private var confirmDelete = false
@@ -48,9 +52,23 @@ struct JobDetailView: View {
                     .accessibilityIdentifier("captureObjectButton")
                     captureButton(title: "LiDAR Mesh", subtitle: "Any space/object", icon: CaptureKind.mesh.icon,
                                   blocked: capabilities?.meshScanBlocker) {
+                        meshScanMode = .room
                         showingMeshScan = true
                     }
                     .accessibilityIdentifier("lidarMeshButton")
+                }
+                HStack(spacing: 10) {
+                    captureButton(title: "Detail scan", subtitle: "3-5 mm, within 1 m", icon: "viewfinder",
+                                  blocked: capabilities?.meshScanBlocker) {
+                        meshScanMode = .detail
+                        showingMeshScan = true
+                    }
+                    .accessibilityIdentifier("detailScanButton")
+                    captureButton(title: "Measure", subtitle: "Point to point", icon: "ruler",
+                                  blocked: capabilities?.meshScanBlocker) {
+                        showingMeasure = true
+                    }
+                    .accessibilityIdentifier("measureLauncherButton")
                 }
                 if let blocker = capabilities?.roomScanBlocker {
                     Label(blocker, systemImage: "info.circle")
@@ -58,6 +76,8 @@ struct JobDetailView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+
+                MeasurementsSummary(job: job)
 
                 SectionHeader(title: "Rooms (\(job.roomCaptures.count))", systemImage: "square.split.bottomrightquarter")
                 if job.roomCaptures.isEmpty {
@@ -101,8 +121,29 @@ struct JobDetailView: View {
                     Label("Import USDZ model", systemImage: "square.and.arrow.down")
                 }
                 .buttonStyle(BigButtonStyle(filled: false))
+
+                if let jobZipURL {
+                    ShareLink(item: jobZipURL) {
+                        Label("Share all (\(jobZipURL.lastPathComponent))", systemImage: "square.and.arrow.up.on.square")
+                    }
+                    .buttonStyle(BigButtonStyle(filled: false))
+                    .accessibilityIdentifier("shareAllJobButton")
+                } else if let jobZipError {
+                    Text(jobZipError).font(.footnote).foregroundStyle(Theme.bad)
+                }
             }
             .padding(16)
+        }
+        .task(id: "\(job.captures.count)-\(job.measurements.count)-\(job.measureScale ?? 0)-\(store.exportsRevision)") {
+            // Job ZIP (every capture's files + measurements.csv) built after the screen appears.
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            do {
+                jobZipURL = try store.makeJobZip(job.id)
+                jobZipError = nil
+            } catch {
+                jobZipURL = nil
+                jobZipError = "Could not build the job ZIP: \(error.localizedDescription)"
+            }
         }
         .navigationTitle(job.name)
         .navigationBarTitleDisplayMode(.inline)
@@ -127,8 +168,14 @@ struct JobDetailView: View {
             }
             .environmentObject(store)
         }
+        .fullScreenCover(isPresented: $showingMeasure) {
+            MeasureLauncher(jobID: job.id) { saved in
+                if saved > 0 { router.path.append(.measurements(job.id)) }
+            }
+            .environmentObject(store)
+        }
         .fullScreenCover(isPresented: $showingMeshScan) {
-            MeshScanLauncher(jobID: job.id) { captureID in
+            MeshScanLauncher(jobID: job.id, initialMode: meshScanMode) { captureID in
                 if let captureID { router.path.append(.capture(job: job.id, capture: captureID, tab: .model)) }
             }
             .environmentObject(store)
@@ -312,6 +359,8 @@ struct MeshCaptureRow: View {
                     Text(capture.title).font(.headline)
                     if capture.origin == .sample { Badge(text: "SAMPLE", color: .gray) }
                     if capture.origin == .lidarMesh { Badge(text: "LIDAR", color: Theme.ok) }
+                    if capture.isDetailScan { Badge(text: "DETAIL", color: Theme.accent) }
+                    if let grade = capture.coachGrade { Badge(text: grade, color: ["A", "B"].contains(grade) ? Theme.ok : Theme.warn) }
                 }
                 if let m {
                     Text(m.dimensionsText(units)).font(.subheadline.monospacedDigit())
@@ -344,6 +393,49 @@ struct PlanThumbnail: View {
             context.withCGContext { cg in
                 PlanCGDrawer.draw(drawing, in: cg, viewport: viewport, options: .init(lineScale: 0.6))
             }
+        }
+    }
+}
+
+/// Measure-tool summary on the job screen: the latest values and a link to the full list.
+struct MeasurementsSummary: View {
+    let job: Job
+    @AppStorage(Preferences.unitsKey) private var unitsRaw = UnitSystem.imperial.rawValue
+
+    var body: some View {
+        let units = UnitSystem(rawValue: unitsRaw) ?? .imperial
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(title: "Measurements (\(job.measurements.count))", systemImage: "ruler")
+            NavigationLink(value: Route.measurements(job.id)) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if job.measurements.isEmpty {
+                        Text("No measurements yet. Tap Measure for point-to-point LiDAR measurements, then calibrate with a tape.")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        ForEach(job.measurements.suffix(3)) { m in
+                            HStack {
+                                Text(m.label).lineLimit(1)
+                                Spacer()
+                                Text(UnitFormatter.precise(m.calibratedMeters(scale: job.measureScale), units))
+                                    .font(.body.weight(.semibold).monospacedDigit())
+                            }
+                        }
+                        HStack(spacing: 6) {
+                            Image(systemName: job.measureScale == nil ? "ruler" : "checkmark.seal.fill")
+                            Text(job.measureScale == nil ? "Not tape calibrated" : String(format: "Tape calibrated × %.4f", job.effectiveMeasureScale))
+                            Spacer()
+                            Text("All").fontWeight(.semibold)
+                            Image(systemName: "chevron.right")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .card()
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("measurementsSummary")
         }
     }
 }

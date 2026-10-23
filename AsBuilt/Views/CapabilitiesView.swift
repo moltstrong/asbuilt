@@ -16,6 +16,8 @@ struct CapabilitiesView: View {
                     }
                     .card()
 
+                    ResolutionGuide()
+
                     SectionHeader(title: "Capabilities", systemImage: "checklist")
                     VStack(spacing: 0) {
                         row("LiDAR depth sensor", ok: caps.hasLiDAR,
@@ -34,6 +36,12 @@ struct CapabilitiesView: View {
                             detail: caps.meshScanBlocker ?? (caps.meshClassification
                                 ? "Ready: live 3D mesh of any space or object, classified walls/floor/doors. No photogrammetry."
                                 : "Ready: live 3D mesh of any space or object. No photogrammetry."))
+                        Divider()
+                        row("Detail scan (depth fusion)", ok: caps.meshScanSupported,
+                            detail: caps.meshScanBlocker ?? "Ready: 4 mm voxels within 1.5 m, colored mesh")
+                        Divider()
+                        row("Measure", ok: caps.meshScanSupported,
+                            detail: caps.meshScanBlocker ?? "Ready: point-to-point LiDAR measuring, tape calibration")
                         Divider()
                         row("Camera permission", ok: caps.cameraStatus == .authorized,
                             warn: caps.cameraStatus == .notDetermined, detail: cameraText(caps.cameraStatus))
@@ -91,6 +99,80 @@ struct CapabilitiesView: View {
         case .restricted: return "Restricted by device management"
         case .notDetermined: return "Not asked yet (asked when you first scan)"
         @unknown default: return "Unknown"
+        }
+    }
+}
+
+/// Honest "what each mode resolves" table + technique tips. Numbers are the hardware's limits:
+/// LiDAR depth is 256x192 (densified from a sparse emitter, ~1 cm absolute accuracy).
+struct ResolutionGuide: View {
+    struct Mode: Identifiable {
+        var id: String { name }
+        let name: String
+        let icon: String
+        let resolves: String
+        let detail: String
+    }
+
+    static let modes: [Mode] = [
+        Mode(name: "Room (RoomPlan)", icon: "square.split.bottomrightquarter", resolves: "about 1-2 cm",
+             detail: "Walls, doors, windows, openings and major fixtures as clean shapes. Not small details."),
+        Mode(name: "LiDAR Mesh", icon: "cube.transparent", resolves: "a few cm",
+             detail: "ARKit's live mesh: triangles of a few cm. Fast for whole spaces."),
+        Mode(name: "Detail scan", icon: "viewfinder", resolves: "about 3-5 mm within 1 m",
+             detail: "Fuses many LiDAR depth frames into 4 mm voxels. Fine shapes appear after several passes; absolute accuracy is still about 1 cm."),
+        Mode(name: "Object Capture", icon: "cube", resolves: "phone: reduced detail",
+             detail: "On-phone builds use Apple's reduced detail. Export the photos for a Mac build: about 1 mm on small textured objects."),
+        Mode(name: "Measure", icon: "ruler", resolves: "about ±1 cm, better after tape calibration",
+             detail: "Each point is the median of about 20 depth samples; the ± comes from their spread."),
+    ]
+
+    static let tips: [(String, String)] = [
+        ("sun.max.fill", "Even, bright light (the torch turns on by itself when it is dark)"),
+        ("tortoise.fill", "Move slowly: keep the speed bar green"),
+        ("arrow.down.right.and.arrow.up.left", "Stay within about 1 m for detail"),
+        ("circle.dashed", "3 passes: low, middle, high"),
+        ("sparkles", "Shiny or plain surfaces: matte spray or painter's tape"),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "What each mode resolves", systemImage: "scope")
+            VStack(spacing: 0) {
+                ForEach(Self.modes) { m in
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: m.icon)
+                            .font(.title3)
+                            .foregroundStyle(Theme.accent)
+                            .frame(width: 32)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(m.name).font(.headline)
+                                Spacer(minLength: 8)
+                                Text(m.resolves)
+                                    .font(.subheadline.weight(.semibold))
+                                    .multilineTextAlignment(.trailing)
+                            }
+                            Text(m.detail).font(.subheadline).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(12)
+                    if m.id != Self.modes.last?.id { Divider() }
+                }
+            }
+            .background(RoundedRectangle(cornerRadius: Theme.corner).fill(Theme.card))
+            .accessibilityIdentifier("resolutionGuide")
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("For the most detail").font(.headline)
+                ForEach(Self.tips, id: \.1) { tip in
+                    Label(tip.1, systemImage: tip.0)
+                        .font(.subheadline)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .card()
         }
     }
 }

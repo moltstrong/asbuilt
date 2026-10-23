@@ -12,6 +12,7 @@ OUT="$3"
 BUNDLE_ID="com.moltstrong.asbuilt"
 ROOM_CAPTURE="6A3B1C2D-0000-4000-8000-00000000B001"   # SampleData.demoCaptureID
 MESH_CAPTURE="6A3B1C2D-0000-4000-8000-00000000B003"   # SampleData.demoMeshCaptureID
+DETAIL_CAPTURE="6A3B1C2D-0000-4000-8000-00000000B004" # SampleData.demoDetailCaptureID
 WAIT="${SMOKE_WAIT:-15}"
 DIAG="$HOME/Library/Logs/DiagnosticReports"
 mkdir -p "$OUT" "$DIAG"
@@ -131,6 +132,15 @@ run_case 03-model -AsBuiltScreen model
 # 4) The demo LiDAR Mesh scan: 3D tab (SceneKit loads the classified mesh USDZ) and Files tab.
 run_case 04-mesh-model -AsBuiltScreen mesh
 run_case 05-mesh-files -AsBuiltScreen mesh-files
+# 5) Build 6: Detail scan demo (real TSDF fusion output), Measure list, Capture Coach HUD preview.
+run_case 06-detail-3d -AsBuiltScreen detail
+run_case 07-measurements -AsBuiltScreen measurements
+run_case 08-coach-hud -AsBuiltScreen coach
+run_case 09-coach-fast -AsBuiltScreen coach-fast
+run_case 10-coach-far -AsBuiltScreen coach-far
+run_case 11-coach-band -AsBuiltScreen coach-band
+run_case 12-coach-grade -AsBuiltScreen coach-grade
+run_case 13-capabilities -AsBuiltScreen capabilities
 
 DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null || true)
 if [[ -n "$DATA" && -d "$DATA/Documents/Jobs" ]]; then
@@ -143,6 +153,15 @@ if [[ -n "$DATA" && -d "$DATA/Documents/Jobs" ]]; then
     cp "$MESH_DIR"/* "$OUT/mesh-exports/" 2>/dev/null || true
   else
     echo "::error::demo LiDAR mesh capture folder not found"
+    FAILED=1
+  fi
+  DETAIL_DIR=$(find "$DATA/Documents/Jobs" -type d -name "$DETAIL_CAPTURE" | head -1)
+  if [[ -n "$DETAIL_DIR" && -s "$DETAIL_DIR/model.usdz" ]]; then
+    cp "$DETAIL_DIR/model.usdz" "$OUT/detail-model.usdz" || true
+    mkdir -p "$OUT/detail-exports"
+    cp "$DETAIL_DIR"/* "$OUT/detail-exports/" 2>/dev/null || true
+  else
+    echo "::error::demo Detail scan files not found"
     FAILED=1
   fi
 fi

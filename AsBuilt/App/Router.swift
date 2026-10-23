@@ -24,12 +24,17 @@ enum Route: Hashable {
     case capture(job: UUID, capture: UUID, tab: CaptureTab)
     case capabilities
     case settings
+    /// Measure-tool measurements of a job (list, tape calibration, CSV).
+    case measurements(UUID)
+    /// Capture Coach HUD driven by synthetic metrics (CI screenshots; the Simulator has no AR).
+    case coachPreview(String)
 }
 
 /// Launch arguments used for demos, UI review and CI screenshots, e.g.
 /// `xcrun simctl launch booted com.moltstrong.asbuilt -AsBuiltScreen plan`.
 struct LaunchOptions {
-    /// jobs | job | plan | takeoff | takeoff-walls | model | files | kitchen | mesh | mesh-files | mesh-quicklook | capabilities | settings
+    /// jobs | job | plan | takeoff | takeoff-walls | model | files | kitchen | mesh | mesh-files | mesh-quicklook |
+    /// detail | detail-files | measurements | coach | coach-fast | coach-far | coach-band | coach-grade | capabilities | settings
     var screen: String?
     var resetDemo: Bool
 
@@ -69,6 +74,10 @@ final class Router: ObservableObject {
         case "kitchen": return [.job(job), .capture(job: job, capture: kitchen, tab: .plan)]
         case "mesh", "mesh-quicklook": return [.job(job), .capture(job: job, capture: SampleData.demoMeshCaptureID, tab: .model)]
         case "mesh-files": return [.job(job), .capture(job: job, capture: SampleData.demoMeshCaptureID, tab: .files)]
+        case "detail": return [.job(job), .capture(job: job, capture: SampleData.demoDetailCaptureID, tab: .model)]
+        case "detail-files": return [.job(job), .capture(job: job, capture: SampleData.demoDetailCaptureID, tab: .files)]
+        case "measurements": return [.job(job), .measurements(job)]
+        case "coach", "coach-fast", "coach-far", "coach-band", "coach-grade": return [.coachPreview(screen ?? "coach")]
         case "capabilities": return [.capabilities]
         case "settings": return [.settings]
         default: return []

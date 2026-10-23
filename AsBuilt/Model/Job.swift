@@ -39,6 +39,9 @@ enum CaptureOrigin: String, Codable, Hashable, Sendable {
     case sample
     /// ARKit scene reconstruction (LiDAR Mesh scan). Added in build 5.
     case lidarMesh
+    /// TSDF fusion of LiDAR depth maps (Detail scan, 4 mm voxels). Added in build 6; older builds
+    /// decode it as `.unknown` and still show the mesh files.
+    case detailScan
     /// Origin written by a newer build.
     case unknown
 
@@ -75,10 +78,14 @@ struct Capture: Codable, Identifiable, Hashable, Sendable {
     var measurements: MeshMeasurements?
     /// Object captures: on-device reconstruction attempts made so far (see reconstruction-log.txt).
     var reconstructionAttempts: Int?
+    /// Capture Coach grade at the end of the scan ("A"..."F") and its one-line fix. Added in build 6.
+    var coachGrade: String?
+    var coachFix: String?
 
     init(id: UUID = UUID(), kind: CaptureKind, origin: CaptureOrigin, title: String, createdAt: Date = Date(),
          notes: String = "", status: CaptureStatus = .complete, statusMessage: String? = nil, imageCount: Int? = nil,
-         measurements: MeshMeasurements? = nil, reconstructionAttempts: Int? = nil) {
+         measurements: MeshMeasurements? = nil, reconstructionAttempts: Int? = nil, coachGrade: String? = nil,
+         coachFix: String? = nil) {
         self.id = id
         self.kind = kind
         self.origin = origin
@@ -90,10 +97,13 @@ struct Capture: Codable, Identifiable, Hashable, Sendable {
         self.imageCount = imageCount
         self.measurements = measurements
         self.reconstructionAttempts = reconstructionAttempts
+        self.coachGrade = coachGrade
+        self.coachFix = coachFix
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, origin, title, createdAt, notes, status, statusMessage, imageCount, measurements, reconstructionAttempts
+        case coachGrade, coachFix
     }
 
     /// Tolerant decoding: job.json files written by builds 1-4 (no `measurements` /
@@ -111,7 +121,12 @@ struct Capture: Codable, Identifiable, Hashable, Sendable {
         imageCount = try c.decodeIfPresent(Int.self, forKey: .imageCount)
         measurements = try? c.decodeIfPresent(MeshMeasurements.self, forKey: .measurements)
         reconstructionAttempts = try c.decodeIfPresent(Int.self, forKey: .reconstructionAttempts)
+        coachGrade = try? c.decodeIfPresent(String.self, forKey: .coachGrade)
+        coachFix = try? c.decodeIfPresent(String.self, forKey: .coachFix)
     }
+
+    /// Detail scan (TSDF fusion) rather than an ARKit mesh scan.
+    var isDetailScan: Bool { origin == .detailScan || (origin == .sample && id == SampleData.demoDetailCaptureID) }
 }
 
 struct Job: Codable, Identifiable, Hashable, Sendable {
@@ -124,9 +139,14 @@ struct Job: Codable, Identifiable, Hashable, Sendable {
     var updatedAt: Date
     var isDemo: Bool
     var captures: [Capture]
+    /// Measure-tool measurements (point to point). Added in build 6.
+    var measurements: [PrecisionMeasurement]
+    /// Tape-calibration scale for measure-tool distances (true / measured), or nil. Added in build 6.
+    var measureScale: Double?
 
     init(id: UUID = UUID(), name: String, address: String = "", client: String = "", notes: String = "",
-         createdAt: Date = Date(), updatedAt: Date = Date(), isDemo: Bool = false, captures: [Capture] = []) {
+         createdAt: Date = Date(), updatedAt: Date = Date(), isDemo: Bool = false, captures: [Capture] = [],
+         measurements: [PrecisionMeasurement] = [], measureScale: Double? = nil) {
         self.id = id
         self.name = name
         self.address = address
@@ -136,7 +156,32 @@ struct Job: Codable, Identifiable, Hashable, Sendable {
         self.updatedAt = updatedAt
         self.isDemo = isDemo
         self.captures = captures
+        self.measurements = measurements
+        self.measureScale = measureScale
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, address, client, notes, createdAt, updatedAt, isDemo, captures, measurements, measureScale
+    }
+
+    /// Tolerant decoding: job.json files from builds 1-5 have no `measurements` / `measureScale`.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Job"
+        address = try c.decodeIfPresent(String.self, forKey: .address) ?? ""
+        client = try c.decodeIfPresent(String.self, forKey: .client) ?? ""
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(timeIntervalSince1970: 0)
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        isDemo = try c.decodeIfPresent(Bool.self, forKey: .isDemo) ?? false
+        captures = try c.decodeIfPresent([Capture].self, forKey: .captures) ?? []
+        measurements = (try? c.decodeIfPresent([PrecisionMeasurement].self, forKey: .measurements)) ?? []
+        measureScale = try? c.decodeIfPresent(Double.self, forKey: .measureScale)
+    }
+
+    /// Tape-calibration scale that is actually applied (implausible values are ignored).
+    var effectiveMeasureScale: Double { PrecisionMeasurement.validScale(measureScale) }
 
     var roomCaptures: [Capture] { captures.filter { $0.kind == .room } }
     var objectCaptures: [Capture] { captures.filter { $0.kind == .object } }
@@ -161,6 +206,7 @@ enum CaptureFile {
     static let meshPLY = LiDARMeshExporter.plyName
     static let meshCSV = LiDARMeshExporter.csvName
     static let scanInfo = LiDARMeshExporter.infoName
+    static let coachReport = "coach-report.txt"
 
     static func description(for name: String) -> String {
         switch name {
@@ -178,6 +224,7 @@ enum CaptureFile {
         case meshOBJ: return "LiDAR mesh, Wavefront OBJ (meters, Y-up, one group per surface type). Blender, SketchUp, Rhino, AutoCAD/Revit via import."
         case meshMTL: return "Colors for mesh.obj (keep it next to the OBJ)."
         case meshPLY: return "LiDAR mesh, binary PLY with vertex colors. MeshLab, CloudCompare, Recap."
+        case coachReport: return "Capture Coach grade, technique stats and the one thing to fix next time."
         case meshCSV: return "Scan size (W x D x H) and scanned surface areas by type."
         case scanInfo: return "Scan measurements as JSON."
         default:

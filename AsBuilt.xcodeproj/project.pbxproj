@@ -7,14 +7,19 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0A717D0C96703E33E992B05B /* CoachPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C34D43E1C1FFC71F42894682 /* CoachPreviewView.swift */; };
 		1B53745D0BFCAC52E82BDFDF /* RoomPlanAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36634BBF4BF9036D23B8D57F /* RoomPlanAdapter.swift */; };
 		2101842F16BD85CD13372AC0 /* DeviceCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE773C26A7825C401A2C7EBC /* DeviceCapabilities.swift */; };
+		23F4E57DE6AEB9933F5780B6 /* DetailScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36F0B41BFD3049EF47F88EAA /* DetailScanView.swift */; };
 		425E380A83E01532EB49D30D /* ModelAndFilesViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55CE9CFC2C82DB014A1E62BE /* ModelAndFilesViews.swift */; };
 		4AF0596E5CD2200CA2FC8889 /* CaptureLaunchers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 392F2A25096FF32008CA869E /* CaptureLaunchers.swift */; };
 		4B763A5A01CDFAC57B1D7A8E /* ExportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53A231D1565D833B17CB3DC4 /* ExportService.swift */; };
+		4C68673D3E732769F6F28D9F /* ARFrameCopy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F79943215CCF0B85F4C5F8C /* ARFrameCopy.swift */; };
 		5241B655B4BFA83CD04A4BAB /* TakeoffView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B11F3E102AD06A8CCF13A72 /* TakeoffView.swift */; };
 		5A0CAFCB9EF842DE5BD9118E /* AsBuiltApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C53DBCAA42BE5CBF44DF32E0 /* AsBuiltApp.swift */; };
 		6058364F550C33740D14C64D /* JobStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B4A03AEDF66E27F7BADFD36 /* JobStore.swift */; };
+		62AB1780E17C7F4A4D12FC91 /* CoachHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = 863DC04AB313B57E5ABBEEFB /* CoachHUD.swift */; };
+		656800FEC5D7E7A054B73CDD /* MeasureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A67D82C09F45EA6B717501C /* MeasureView.swift */; };
 		6993E80AE59E279F99BD78F9 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8CF05DD0EFCE2C332F818EBD /* PrivacyInfo.xcprivacy */; };
 		78F7E59CC24925F72EFAC6C2 /* ObjectCaptureFlowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BBF8D252112C7CA095856BD /* ObjectCaptureFlowView.swift */; };
 		837D5BAF63662FB99B6830ED /* Router.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCF54DCEF0AE76E25D64D66 /* Router.swift */; };
@@ -46,9 +51,11 @@
 
 /* Begin PBXFileReference section */
 		1B203540A0BFC851F5AFC2FF /* PDFPlanRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PDFPlanRenderer.swift; sourceTree = "<group>"; };
+		1F79943215CCF0B85F4C5F8C /* ARFrameCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARFrameCopy.swift; sourceTree = "<group>"; };
 		1FB6A8AA2F96746C3CD6BEE0 /* LiDARMeshScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiDARMeshScanView.swift; sourceTree = "<group>"; };
 		25DC1E0A24E1A488207F210A /* Job.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Job.swift; sourceTree = "<group>"; };
 		36634BBF4BF9036D23B8D57F /* RoomPlanAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomPlanAdapter.swift; sourceTree = "<group>"; };
+		36F0B41BFD3049EF47F88EAA /* DetailScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailScanView.swift; sourceTree = "<group>"; };
 		392F2A25096FF32008CA869E /* CaptureLaunchers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureLaunchers.swift; sourceTree = "<group>"; };
 		48B91AA828710384BA219AE4 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		4BCF54DCEF0AE76E25D64D66 /* Router.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Router.swift; sourceTree = "<group>"; };
@@ -60,11 +67,14 @@
 		6BBF8D252112C7CA095856BD /* ObjectCaptureFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectCaptureFlowView.swift; sourceTree = "<group>"; };
 		6FDAFA9487824FCC6E9867CC /* AsBuiltCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = AsBuiltCore; path = AsBuiltCore; sourceTree = SOURCE_ROOT; };
 		835469C75EDDCABC4860131F /* AsBuilt.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AsBuilt.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		863DC04AB313B57E5ABBEEFB /* CoachHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachHUD.swift; sourceTree = "<group>"; };
 		8CF05DD0EFCE2C332F818EBD /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		9A67D82C09F45EA6B717501C /* MeasureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasureView.swift; sourceTree = "<group>"; };
 		9B4A03AEDF66E27F7BADFD36 /* JobStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobStore.swift; sourceTree = "<group>"; };
 		9F477EEB208681925DD411B2 /* JobDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobDetailView.swift; sourceTree = "<group>"; };
 		A54E409DE45928CA7BA1C3C2 /* AsBuiltTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AsBuiltTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0FD7A3C01E78ACC107AEF10 /* ObjectReconstructor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectReconstructor.swift; sourceTree = "<group>"; };
+		C34D43E1C1FFC71F42894682 /* CoachPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoachPreviewView.swift; sourceTree = "<group>"; };
 		C53DBCAA42BE5CBF44DF32E0 /* AsBuiltApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsBuiltApp.swift; sourceTree = "<group>"; };
 		CABD7E51DB071EB42D15C5B7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		DE773C26A7825C401A2C7EBC /* DeviceCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCapabilities.swift; sourceTree = "<group>"; };
@@ -128,6 +138,7 @@
 			children = (
 				51554FA7BA8734A06E959BE9 /* CapabilitiesView.swift */,
 				EBFEAB7DE9B3D3417AFAE70E /* CaptureDetailView.swift */,
+				C34D43E1C1FFC71F42894682 /* CoachPreviewView.swift */,
 				9F477EEB208681925DD411B2 /* JobDetailView.swift */,
 				F11D54B6B89E71C3C6C3BCA7 /* JobListView.swift */,
 				55CE9CFC2C82DB014A1E62BE /* ModelAndFilesViews.swift */,
@@ -139,9 +150,13 @@
 		7322490E63B58C94CFB16BDE /* Capture */ = {
 			isa = PBXGroup;
 			children = (
+				1F79943215CCF0B85F4C5F8C /* ARFrameCopy.swift */,
 				392F2A25096FF32008CA869E /* CaptureLaunchers.swift */,
+				863DC04AB313B57E5ABBEEFB /* CoachHUD.swift */,
+				36F0B41BFD3049EF47F88EAA /* DetailScanView.swift */,
 				DE773C26A7825C401A2C7EBC /* DeviceCapabilities.swift */,
 				1FB6A8AA2F96746C3CD6BEE0 /* LiDARMeshScanView.swift */,
+				9A67D82C09F45EA6B717501C /* MeasureView.swift */,
 				6BBF8D252112C7CA095856BD /* ObjectCaptureFlowView.swift */,
 				C0FD7A3C01E78ACC107AEF10 /* ObjectReconstructor.swift */,
 				36634BBF4BF9036D23B8D57F /* RoomPlanAdapter.swift */,
@@ -309,10 +324,14 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4C68673D3E732769F6F28D9F /* ARFrameCopy.swift in Sources */,
 				5A0CAFCB9EF842DE5BD9118E /* AsBuiltApp.swift in Sources */,
 				DB3A0FFA4D9583812AF20334 /* CapabilitiesView.swift in Sources */,
 				8DD3622F1AB7A25944E1C2F8 /* CaptureDetailView.swift in Sources */,
 				4AF0596E5CD2200CA2FC8889 /* CaptureLaunchers.swift in Sources */,
+				62AB1780E17C7F4A4D12FC91 /* CoachHUD.swift in Sources */,
+				0A717D0C96703E33E992B05B /* CoachPreviewView.swift in Sources */,
+				23F4E57DE6AEB9933F5780B6 /* DetailScanView.swift in Sources */,
 				2101842F16BD85CD13372AC0 /* DeviceCapabilities.swift in Sources */,
 				4B763A5A01CDFAC57B1D7A8E /* ExportService.swift in Sources */,
 				BAAEEE5FF7990FBD13986CBF /* Job.swift in Sources */,
@@ -320,6 +339,7 @@
 				C0C78CF4C72688B457E3E56A /* JobListView.swift in Sources */,
 				6058364F550C33740D14C64D /* JobStore.swift in Sources */,
 				85AC9866F3F6878C88BAA8E5 /* LiDARMeshScanView.swift in Sources */,
+				656800FEC5D7E7A054B73CDD /* MeasureView.swift in Sources */,
 				425E380A83E01532EB49D30D /* ModelAndFilesViews.swift in Sources */,
 				78F7E59CC24925F72EFAC6C2 /* ObjectCaptureFlowView.swift in Sources */,
 				C3B3F117DAEC151B1EEF9EA3 /* ObjectReconstructor.swift in Sources */,
@@ -378,7 +398,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 6;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -489,7 +509,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 6;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = "";
 				ENABLE_NS_ASSERTIONS = NO;
