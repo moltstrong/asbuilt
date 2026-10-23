@@ -48,16 +48,11 @@ jobs:
           KEY_DIR="$HOME/.appstoreconnect/private_keys"
           KEY_PATH="$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
           mkdir -p "$KEY_DIR"
-          if printf '%s' "$ASC_KEY_P8" | grep -q "BEGIN PRIVATE KEY"; then
-            # Raw .p8 text (also tolerates literal "\n" sequences from copy/paste).
-            printf '%b\n' "$ASC_KEY_P8" > "$KEY_PATH"
-          else
-            # Fallback: base64-encoded .p8.
-            printf '%s' "$ASC_KEY_P8" | base64 --decode > "$KEY_PATH"
-          fi
+          # Accepts the full .p8, body-only, base64, literal \n, CRLF or iOS smart-dash pastes.
+          KEY_PATH="$KEY_PATH" python3 scripts/install-asc-key.py
           chmod 600 "$KEY_PATH"
-          if ! grep -q "BEGIN PRIVATE KEY" "$KEY_PATH"; then
-            echo "::error title=Bad ASC_KEY_P8::ASC_KEY_P8 must be the full contents of AuthKey_XXXX.p8, including the BEGIN/END PRIVATE KEY lines."
+          if ! openssl pkey -in "$KEY_PATH" -noout 2>/dev/null; then
+            echo "::error title=Bad ASC_KEY_P8::ASC_KEY_P8 decoded but is not a valid private key."
             exit 1
           fi
           echo "ASC_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
