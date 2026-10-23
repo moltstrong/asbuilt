@@ -21,10 +21,33 @@ xcrun simctl status_bar "$UDID" override --time "9:41" --batteryState charged --
   --cellularMode active --cellularBars 4 --wifiBars 3 2>/dev/null || true
 xcrun simctl ui "$UDID" appearance light 2>/dev/null || true
 
+# Install what a user gets: the app without the XCTest plug-in, code-signed (ad hoc). Simulator builds
+# made with CODE_SIGNING_ALLOWED=NO are unsigned, and newer simulators may refuse to launch those.
+STAGE="$(mktemp -d)/AsBuilt.app"
+ditto "$APP" "$STAGE"
+rm -rf "$STAGE/PlugIns" "$STAGE/Frameworks/XCTest.framework" "$STAGE/Frameworks/libXCTestSwiftSupport.dylib" \
+  "$STAGE/Frameworks/XCTestCore.framework" "$STAGE/Frameworks/XCUIAutomation.framework" 2>/dev/null || true
+codesign --force --deep --sign - --timestamp=none "$STAGE"
+codesign -dv "$STAGE" 2>&1 | grep -E "Identifier|Signature|Format" || true
+APP="$STAGE"
+
 # Fresh install: drop any previous copy (and its data container) first.
 xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
 xcrun simctl uninstall "$UDID" "$BUNDLE_ID" 2>/dev/null || true
 xcrun simctl install "$UDID" "$APP"
+xcrun simctl listapps "$UDID" 2>/dev/null | grep -A3 "\"$BUNDLE_ID\"" | head -4 || true
+
+# A freshly created simulator keeps migrating data after bootstatus returns; launches during that
+# window fail with "did not return a process handle". Wait until a system app launches (max ~3 min).
+for i in $(seq 1 18); do
+  if xcrun simctl launch "$UDID" com.apple.Preferences 2>&1 | grep -qE ': [0-9]+$'; then
+    echo "simulator ready for launches after warm-up attempt $i"
+    xcrun simctl terminate "$UDID" com.apple.Preferences 2>/dev/null || true
+    break
+  fi
+  echo "warm-up attempt $i: launch services not ready yet"
+  sleep 10
+done
 
 MARKER="$OUT/.smoke-start"
 touch "$MARKER"
@@ -65,16 +88,27 @@ check_alive() {
   [[ $ok -eq 1 ]]
 }
 
+dump_launch_diagnostics() {
+  local name="$1"
+  echo "---- [$name] simulator log (last 3 min, AsBuilt / launch related)"
+  xcrun simctl spawn "$UDID" log show --last 3m --style compact \
+    --predicate 'eventMessage CONTAINS[c] "asbuilt" OR process == "AsBuilt"' 2>/dev/null \
+    | tail -60 | tee "$OUT/$name.syslog.txt" || true
+}
+
 run_case() {
   local name="$1"; shift
   xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
-  sleep 1
-  local out pid
-  out=$(xcrun simctl launch --terminate-running-process \
-          --stdout="$OUT/$name.stdout.log" --stderr="$OUT/$name.stderr.log" \
-          "$UDID" "$BUNDLE_ID" "$@" 2>&1)
-  echo "[$name] simctl launch: $out"
-  pid=$(sed -nE 's/.*: ([0-9]+)$/\1/p' <<<"$out" | tail -1)
+  sleep 2
+  local out="" pid="" attempt
+  for attempt in 1 2 3; do
+    out=$(xcrun simctl launch "$UDID" "$BUNDLE_ID" "$@" 2>&1)
+    echo "[$name] simctl launch (attempt $attempt): $out"
+    pid=$(sed -nE 's/^.*: ([0-9]+)$/\1/p' <<<"$out" | tail -1)
+    [[ -n "$pid" ]] && break
+    sleep 10
+  done
+  [[ -z "$pid" ]] && dump_launch_diagnostics "$name"
   sleep "$WAIT"
   xcrun simctl io "$UDID" screenshot --type=png "$OUT/$name.png" || true
   if check_alive "$name" "$pid"; then
@@ -82,9 +116,7 @@ run_case() {
   else
     echo "[$name] FAIL"
     FAILED=1
-    for f in "$OUT/$name.stdout.log" "$OUT/$name.stderr.log"; do
-      [[ -s "$f" ]] && { echo "---- $f"; tail -40 "$f"; }
-    done
+    dump_launch_diagnostics "$name-after"
   fi
 }
 
