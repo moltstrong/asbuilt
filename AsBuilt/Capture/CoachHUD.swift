@@ -491,7 +491,8 @@ struct GradeCard: View {
                     Text(report.fix ?? "Clean scan")
                         .font(.title3.weight(.bold))
                         .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 12) {
+                    // Stacked, not side by side: "69% covered" / "92% good motion" truncated on 402 pt phones.
+                    VStack(alignment: .leading, spacing: 4) {
                         stat("\(Int((report.coverageFraction * 100).rounded()))%", "covered", "circle.dashed")
                         stat("\(Int((report.goodFraction * 100).rounded()))%", "good motion", "hand.thumbsup.fill")
                     }
@@ -531,6 +532,8 @@ struct GradeCard: View {
     private func stat(_ value: String, _ label: String, _ icon: String) -> some View {
         Label {
             Text("\(value) \(label)").font(.caption.weight(.semibold).monospacedDigit())
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
         } icon: {
             Image(systemName: icon)
         }

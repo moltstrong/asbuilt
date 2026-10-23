@@ -52,8 +52,9 @@ struct CoachPreviewView: View {
                     bottomBar
                 }
                 .padding(.horizontal, 16)
-                .padding(.top, geo.safeAreaInsets.top + 6)
-                .padding(.bottom, geo.safeAreaInsets.bottom + 10)
+                // Below the Dynamic Island (the ZStack ignores the safe area, so geo's insets read 0 here).
+                .padding(.top, max(geo.safeAreaInsets.top, 59) + 6)
+                .padding(.bottom, max(geo.safeAreaInsets.bottom, 34) + 10)
                 if scenario == .grade, let report = result?.report {
                     Color.black.opacity(0.35)
                     GradeCard(report: report, onFillGaps: {}, onDone: {})
