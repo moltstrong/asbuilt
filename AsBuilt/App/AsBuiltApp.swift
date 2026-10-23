@@ -29,6 +29,7 @@ struct AsBuiltApp: App {
 struct RootView: View {
     @EnvironmentObject private var router: Router
     @EnvironmentObject private var store: JobStore
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack(path: $router.path) {
@@ -47,9 +48,19 @@ struct RootView: View {
                         MeasurementsView(jobID: jobID)
                     case .coachPreview(let name):
                         CoachPreviewView(scenario: CoachDemo.Scenario(rawValue: name) ?? .midScan)
+                    case .remoteBuildPreview(let name):
+                        RemoteBuildPreviewView(scenario: name)
                     }
                 }
         }
-        .task { await store.prepareDemoExports() }
+        .task {
+            // Mac full-detail builds pick up where they stopped (app killed, network lost, new tunnel URL).
+            RemoteBuildService.shared.attach(store)
+            RemoteBuildService.shared.resumeActive()
+            await store.prepareDemoExports()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { RemoteBuildService.shared.resumeActive() }
+        }
     }
 }

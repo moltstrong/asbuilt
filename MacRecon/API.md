@@ -74,7 +74,8 @@ Request:
 | `filename` | string | yes | must end in `.zip`; basename only |
 | `totalBytes` | int | yes | 1 … 8 GiB |
 | `sha256` | string | yes | 64 lowercase hex |
-| `detail` | `full` \| `raw` \| `custom` | no (default `full`) | `full`: about 100-250k triangles plus 8K diffuse/normal/roughness/AO/displacement maps, ARKit-valid. `raw`: all reconstructed geometry (≈0.5-2M triangles) with one 8K diffuse map, for measurement and CAD. `custom`: `maxPolygons` + `texture` |
+| `detail` | `full` \| `raw` \| `custom` \| `phone` | no (default `full`) | `full`: about 100-250k triangles plus 8K diffuse/normal/roughness/AO/displacement maps, ARKit-valid. `raw`: all reconstructed geometry (≈0.5-2M triangles) with one 8K diffuse map, for measurement and CAD. `custom`: `maxPolygons` + `texture`. `phone` (what AsBuilt sends): 250,000 triangles (Apple's cap here) with 8K diffuse + normal maps as JPEG, about 30 MB, opens in SceneKit/AR Quick Look on an iPhone |
+| `autoComplete` | bool | no (default false) | the server calls `complete` itself once the last chunk arrives, so the phone can sleep right after uploading |
 | `texture` | `4k` \| `8k` | no (default `8k`) | used for `custom` |
 | `maxPolygons` | int | no | `custom` only, 10,000-20,000,000, default 1,000,000. **Apple clamps it to 250,000 on this Mac**; use `raw` for more geometry |
 | `obj` | bool | no (default false) | also produce `model-obj.zip` (OBJ+MTL+textures) |

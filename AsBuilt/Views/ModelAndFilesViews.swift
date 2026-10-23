@@ -32,8 +32,11 @@ struct ModelTabView: View {
                         .clipShape(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous).stroke(Theme.hairline, lineWidth: 0.5))
                         .accessibilityIdentifier("modelView")
-                    Text("Drag to orbit, pinch to zoom.")
+                    Text(url.lastPathComponent == CaptureFile.fullModelUSDZ
+                         ? "Full-detail model from your Mac. Drag to orbit, pinch to zoom."
+                         : "Drag to orbit, pinch to zoom.")
                         .font(.footnote).foregroundStyle(.secondary)
+                    RemoteBuildCard(jobID: jobID, capture: capture)
                     if capture.kind == .mesh, let m = store.meshMeasurements(job: jobID, capture: capture.id) {
                         MeshSummaryView(measurements: m, units: units)
                     }
@@ -77,6 +80,7 @@ struct ModelTabView: View {
                             Text(notice).font(.footnote).multilineTextAlignment(.center).foregroundStyle(.secondary)
                         }
                         if capture.kind == .object {
+                            RemoteBuildCard(jobID: jobID, capture: capture)
                             if capture.status == .imagesOnly || capture.status == .processing || capture.status == .failed {
                                 RetryReconstructionSection(jobID: jobID, capture: capture)
                                 Button {

@@ -47,6 +47,10 @@ shoot 16-coach-fast -AsBuiltScreen coach-fast
 shoot 17-coach-far -AsBuiltScreen coach-far
 shoot 18-coach-band -AsBuiltScreen coach-band
 shoot 19-coach-grade -AsBuiltScreen coach-grade
+# Build 7: full-detail Mac build card.
+shoot 20-mac-build -AsBuiltScreen mac-build
+shoot 21-mac-build-upload -AsBuiltScreen mac-build-upload
+shoot 22-mac-build-done -AsBuiltScreen mac-build-done
 
 # Copy the files the app generated for the demo job, as proof that exports work in the Simulator.
 DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data)

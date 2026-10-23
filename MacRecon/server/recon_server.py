@@ -54,7 +54,13 @@ AUTH_FAIL_WINDOW = 600      # seconds
 AUTH_FAIL_LIMIT = 10        # failures per IP per window
 AUTH_LOCKOUT = 900          # seconds an IP is locked out after hitting the limit
 
-DETAILS = ("full", "raw", "custom")
+DETAILS = ("full", "raw", "custom", "phone")
+# "phone": the most detail Apple allows on this Mac, packaged to open on an iPhone: 250k triangles
+# (Apple's cap for custom detail here, ~2x what "full" picks) with 8K diffuse + normal maps as JPEG,
+# about 30 MB instead of ~300 MB for "full" (5 PNG/EXR maps). Two 8K maps decode to ~0.7 GB in
+# SceneKit, which a Pro iPhone handles; five would not.
+PHONE_PRESET = ["--detail", "custom", "--texture", "8k", "--max-polys", "250000",
+                "--maps", "diffuse,normal", "--texture-format", "jpeg:0.9"]
 TEXTURES = ("4k", "8k")
 FILE_NAMES = ("model.usdz", "model-obj.zip", "recon-log.txt", "thumbnail.png")
 CONTENT_TYPES = {
@@ -350,7 +356,8 @@ class Worker(threading.Thread):
             os.remove(status_path)
         except OSError:
             pass
-        args = [self.cli, "build", os.path.join(jdir, "input.zip"), "--detail", job["detail"], "--out", out,
+        detail_args = PHONE_PRESET if job["detail"] == "phone" else ["--detail", job["detail"]]
+        args = [self.cli, "build", os.path.join(jdir, "input.zip")] + detail_args + ["--out", out,
                 "--status-file", status_path, "--title", job.get("title") or job["captureID"],
                 # Lets a build that was interrupted by a server restart resume instead of starting over.
                 "--checkpoint", os.path.join(jdir, "checkpoint")]
@@ -422,7 +429,7 @@ class Worker(threading.Thread):
         log.info("job %s: %s in %.0fs (rc=%s, polygons=%s)", jid, j["state"], secs, rc, j.get("polygons"))
         if j.get("notify", True):
             title = j.get("title") or j["captureID"]
-            word = "%s-detail" % j["detail"]
+            word = "full-detail" if j["detail"] == "phone" else "%s-detail" % j["detail"]
             text = ("AsBuilt: '%s' %s model is ready \u2014 open the app." % (title, word)) if j["state"] == "done" else \
                    ("AsBuilt: '%s' %s build failed \u2014 open the app for details." % (title, word))
             ok, info = self.notifier.send(text)
@@ -434,6 +441,80 @@ class Worker(threading.Thread):
                     self.store.save_job(j2)
                 except ApiError:
                     pass
+
+
+def assemble_upload(store, uid):
+    """Assemble an upload's chunks, verify the whole-file sha256 and enqueue a job (idempotent)."""
+    with store.lock:
+        lock = store.complete_locks.setdefault(uid, threading.Lock())
+    with lock:  # one assembly per upload at a time; a retry waits and then gets the same jobID
+        with store.lock:
+            meta = store.load_upload(uid)
+            if meta["state"] == "completed":
+                return {"jobID": meta["jobID"], "uploadID": uid, "alreadyCompleted": True}
+            got = set(store.received_chunks(uid))
+            missing = [i for i in range(meta["chunkCount"]) if i not in got]
+            if missing:
+                raise ApiError(409, "missing_chunks", "%d of %d chunks haven't arrived yet." % (len(missing), meta["chunkCount"]),
+                               missingChunks=missing[:1000], missingCount=len(missing))
+        udir = store.upload_dir(uid)
+        jid = new_id("job")
+        jdir = store.job_dir(jid)
+        os.makedirs(jdir)
+        dest = os.path.join(jdir, "input.zip")
+        h = hashlib.sha256()
+        t0 = time.time()
+        with open(dest, "wb") as out:
+            for i in range(meta["chunkCount"]):
+                with open(os.path.join(udir, "chunks", "%d.part" % i), "rb") as f:
+                    while True:
+                        b = f.read(4 * MiB)
+                        if not b:
+                            break
+                        h.update(b)
+                        out.write(b)
+            out.flush()
+            os.fsync(out.fileno())
+        digest = h.hexdigest()
+        size = os.path.getsize(dest)
+        if digest != meta["sha256"] or size != meta["totalBytes"]:
+            shutil.rmtree(jdir, ignore_errors=True)
+            with store.lock:
+                shutil.rmtree(os.path.join(udir, "chunks"), ignore_errors=True)
+                os.makedirs(os.path.join(udir, "chunks"))
+                meta["updatedAtEpoch"] = time.time()
+                store.save_upload(meta)
+            log.warning("upload %s: whole-file sha256 mismatch (got %s..., want %s...)", uid, digest[:12], meta["sha256"][:12])
+            raise ApiError(422, "sha256_mismatch",
+                           "The uploaded file doesn't match its checksum. All chunks were discarded; upload them again.",
+                           expected=meta["sha256"], actual=digest)
+        t = time.time()
+        job = {"jobID": jid, "uploadID": uid, "captureID": meta["captureID"], "title": meta.get("title"),
+               "detail": meta["detail"], "texture": meta.get("texture"), "obj": meta.get("obj", False),
+               "maxPolygons": meta.get("maxPolygons"), "notify": meta.get("notify", True),
+               "inputBytes": size, "inputSha256": digest, "state": "queued", "progress": 0.0,
+               "message": "Waiting for the Mac", "createdAt": now_iso(t), "files": [], "restarts": 0}
+        with store.lock:
+            store.save_job(job)
+            meta["state"] = "completed"
+            meta["jobID"] = jid
+            meta["updatedAtEpoch"] = t
+            store.save_upload(meta)
+            shutil.rmtree(os.path.join(udir, "chunks"), ignore_errors=True)
+            store.wake.notify_all()
+        log.info("upload %s complete -> job %s (%d bytes assembled+verified in %.1fs)", uid, jid, size, time.time() - t0)
+        return {"jobID": jid, "uploadID": uid, "alreadyCompleted": False}
+
+
+def auto_complete_upload(store, uid):
+    """Background /complete for uploads created with autoComplete (the phone may be asleep)."""
+    try:
+        r = assemble_upload(store, uid)
+        log.info("upload %s auto-completed -> %s", uid, r["jobID"])
+    except ApiError as e:
+        log.warning("upload %s auto-complete: %s %s", uid, e.status, e.code)
+    except Exception:
+        log.exception("upload %s auto-complete crashed", uid)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -733,6 +814,7 @@ class Handler(BaseHTTPRequestHandler):
             "chunkCount": meta["chunkCount"], "receivedChunks": got,
             "receivedBytes": sum(self.expected_chunk_size(meta, n) for n in got),
             "state": meta["state"], "jobID": meta.get("jobID"), "detail": meta["detail"],
+            "autoComplete": bool(meta.get("autoComplete")),
             "createdAt": meta["createdAt"], "expiresAt": now_iso(meta["updatedAtEpoch"] + RETENTION_SECONDS),
         }
 
@@ -772,7 +854,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "invalid_field", "sha256 must be 64 lowercase hex characters.", field="sha256")
         detail = field("detail", str, required=False) or "full"
         if detail not in DETAILS:
-            raise ApiError(400, "invalid_field", "detail must be one of full, raw, custom.", field="detail")
+            raise ApiError(400, "invalid_field", "detail must be one of full, raw, custom, phone.", field="detail")
         texture = field("texture", str, required=False) or "8k"
         if texture not in TEXTURES:
             raise ApiError(400, "invalid_field", "texture must be 4k or 8k.", field="texture")
@@ -789,6 +871,7 @@ class Handler(BaseHTTPRequestHandler):
         title = field("title", str, required=False)
         title = (title or "").strip()[:120] or None
         notify = field("notify", bool, required=False)
+        auto_complete = bool(field("autoComplete", bool, required=False))
 
         store = self.app.store
         with store.lock:
@@ -805,7 +888,7 @@ class Handler(BaseHTTPRequestHandler):
             meta = {"uploadID": uid, "captureID": capture, "filename": filename, "totalBytes": total, "sha256": sha,
                     "chunkSize": chunk, "chunkCount": (total + chunk - 1) // chunk, "detail": detail,
                     "texture": texture, "obj": obj, "maxPolygons": max_polys, "title": title,
-                    "notify": True if notify is None else notify, "state": "open",
+                    "notify": True if notify is None else notify, "state": "open", "autoComplete": auto_complete,
                     "createdAt": now_iso(t), "updatedAtEpoch": t}
             store.save_upload(meta)
         log.info("upload %s created: capture=%s %d bytes, %d chunks, detail=%s", uid, capture, total, meta["chunkCount"], detail)
@@ -879,71 +962,17 @@ class Handler(BaseHTTPRequestHandler):
                     os.remove(tmp)
                 except OSError:
                     pass
+        auto = bool(meta.get("autoComplete")) and len(received) == meta["chunkCount"]
+        if auto:
+            # Phones upload chunks from a background URLSession while the app is suspended, so they
+            # can't call /complete themselves: assemble + enqueue as soon as the last chunk lands.
+            threading.Thread(target=auto_complete_upload, args=(store, uid), daemon=True).start()
         self.send_json(200, {"uploadID": uid, "index": n, "bytes": got, "sha256": digest,
-                             "receivedChunks": received, "chunkCount": meta["chunkCount"]})
+                             "receivedChunks": received, "chunkCount": meta["chunkCount"], "autoCompleting": auto})
 
     def complete_upload(self, uid):
-        store = self.app.store
-        with store.lock:
-            lock = store.complete_locks.setdefault(uid, threading.Lock())
-        with lock:  # one assembly per upload at a time; a retry waits and then gets the same jobID
-            with store.lock:
-                meta = store.load_upload(uid)
-                if meta["state"] == "completed":
-                    self.send_json(200, {"jobID": meta["jobID"], "uploadID": uid, "alreadyCompleted": True})
-                    return
-                got = set(store.received_chunks(uid))
-                missing = [i for i in range(meta["chunkCount"]) if i not in got]
-                if missing:
-                    raise ApiError(409, "missing_chunks", "%d of %d chunks haven't arrived yet." % (len(missing), meta["chunkCount"]),
-                                   missingChunks=missing[:1000], missingCount=len(missing))
-            udir = store.upload_dir(uid)
-            jid = new_id("job")
-            jdir = store.job_dir(jid)
-            os.makedirs(jdir)
-            dest = os.path.join(jdir, "input.zip")
-            h = hashlib.sha256()
-            t0 = time.time()
-            with open(dest, "wb") as out:
-                for i in range(meta["chunkCount"]):
-                    with open(os.path.join(udir, "chunks", "%d.part" % i), "rb") as f:
-                        while True:
-                            b = f.read(4 * MiB)
-                            if not b:
-                                break
-                            h.update(b)
-                            out.write(b)
-                out.flush()
-                os.fsync(out.fileno())
-            digest = h.hexdigest()
-            size = os.path.getsize(dest)
-            if digest != meta["sha256"] or size != meta["totalBytes"]:
-                shutil.rmtree(jdir, ignore_errors=True)
-                with store.lock:
-                    shutil.rmtree(os.path.join(udir, "chunks"), ignore_errors=True)
-                    os.makedirs(os.path.join(udir, "chunks"))
-                    meta["updatedAtEpoch"] = time.time()
-                    store.save_upload(meta)
-                log.warning("upload %s: whole-file sha256 mismatch (got %s..., want %s...)", uid, digest[:12], meta["sha256"][:12])
-                raise ApiError(422, "sha256_mismatch",
-                               "The uploaded file doesn't match its checksum. All chunks were discarded; upload them again.",
-                               expected=meta["sha256"], actual=digest)
-            t = time.time()
-            job = {"jobID": jid, "uploadID": uid, "captureID": meta["captureID"], "title": meta.get("title"),
-                   "detail": meta["detail"], "texture": meta.get("texture"), "obj": meta.get("obj", False),
-                   "maxPolygons": meta.get("maxPolygons"), "notify": meta.get("notify", True),
-                   "inputBytes": size, "inputSha256": digest, "state": "queued", "progress": 0.0,
-                   "message": "Waiting for the Mac", "createdAt": now_iso(t), "files": [], "restarts": 0}
-            with store.lock:
-                store.save_job(job)
-                meta["state"] = "completed"
-                meta["jobID"] = jid
-                meta["updatedAtEpoch"] = t
-                store.save_upload(meta)
-                shutil.rmtree(os.path.join(udir, "chunks"), ignore_errors=True)
-                store.wake.notify_all()
-            log.info("upload %s complete -> job %s (%d bytes assembled+verified in %.1fs)", uid, jid, size, time.time() - t0)
-            self.send_json(201, {"jobID": jid, "uploadID": uid, "alreadyCompleted": False})
+        result = assemble_upload(self.app.store, uid)
+        self.send_json(200 if result["alreadyCompleted"] else 201, result)
 
     def job_view(self, job, queue=None):
         store = self.app.store

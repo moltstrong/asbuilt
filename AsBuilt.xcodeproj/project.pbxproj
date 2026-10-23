@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0A717D0C96703E33E992B05B /* CoachPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C34D43E1C1FFC71F42894682 /* CoachPreviewView.swift */; };
+		1827B6D7343904DE6BDAA237 /* RemoteBuildService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A9A4E4FCDBA20EA7619844A /* RemoteBuildService.swift */; };
 		1B53745D0BFCAC52E82BDFDF /* RoomPlanAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36634BBF4BF9036D23B8D57F /* RoomPlanAdapter.swift */; };
 		2101842F16BD85CD13372AC0 /* DeviceCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE773C26A7825C401A2C7EBC /* DeviceCapabilities.swift */; };
 		23F4E57DE6AEB9933F5780B6 /* DetailScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36F0B41BFD3049EF47F88EAA /* DetailScanView.swift */; };
@@ -38,6 +39,7 @@
 		D723CC79F9C126B365F2396A /* VertexColorPatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83BA784030603723DDBA98F5 /* VertexColorPatch.swift */; };
 		DB3A0FFA4D9583812AF20334 /* CapabilitiesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51554FA7BA8734A06E959BE9 /* CapabilitiesView.swift */; };
 		F8ED33BC2505899E9028483E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 4D887AE973AD69FBECD01551 /* Assets.xcassets */; };
+		F9EFE2AD16F2936AC35284E7 /* RemoteBuildViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C1485C4476E437C14501F89 /* RemoteBuildViews.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -55,6 +57,7 @@
 		1F79943215CCF0B85F4C5F8C /* ARFrameCopy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ARFrameCopy.swift; sourceTree = "<group>"; };
 		1FB6A8AA2F96746C3CD6BEE0 /* LiDARMeshScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiDARMeshScanView.swift; sourceTree = "<group>"; };
 		25DC1E0A24E1A488207F210A /* Job.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Job.swift; sourceTree = "<group>"; };
+		2A9A4E4FCDBA20EA7619844A /* RemoteBuildService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteBuildService.swift; sourceTree = "<group>"; };
 		36634BBF4BF9036D23B8D57F /* RoomPlanAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoomPlanAdapter.swift; sourceTree = "<group>"; };
 		36F0B41BFD3049EF47F88EAA /* DetailScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailScanView.swift; sourceTree = "<group>"; };
 		392F2A25096FF32008CA869E /* CaptureLaunchers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureLaunchers.swift; sourceTree = "<group>"; };
@@ -66,6 +69,7 @@
 		55CE9CFC2C82DB014A1E62BE /* ModelAndFilesViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelAndFilesViews.swift; sourceTree = "<group>"; };
 		5B11F3E102AD06A8CCF13A72 /* TakeoffView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TakeoffView.swift; sourceTree = "<group>"; };
 		6BBF8D252112C7CA095856BD /* ObjectCaptureFlowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectCaptureFlowView.swift; sourceTree = "<group>"; };
+		6C1485C4476E437C14501F89 /* RemoteBuildViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteBuildViews.swift; sourceTree = "<group>"; };
 		6FDAFA9487824FCC6E9867CC /* AsBuiltCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = AsBuiltCore; path = AsBuiltCore; sourceTree = SOURCE_ROOT; };
 		835469C75EDDCABC4860131F /* AsBuilt.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AsBuilt.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		83BA784030603723DDBA98F5 /* VertexColorPatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VertexColorPatch.swift; sourceTree = "<group>"; };
@@ -144,6 +148,7 @@
 				9F477EEB208681925DD411B2 /* JobDetailView.swift */,
 				F11D54B6B89E71C3C6C3BCA7 /* JobListView.swift */,
 				55CE9CFC2C82DB014A1E62BE /* ModelAndFilesViews.swift */,
+				6C1485C4476E437C14501F89 /* RemoteBuildViews.swift */,
 				5B11F3E102AD06A8CCF13A72 /* TakeoffView.swift */,
 				83BA784030603723DDBA98F5 /* VertexColorPatch.swift */,
 			);
@@ -162,6 +167,7 @@
 				9A67D82C09F45EA6B717501C /* MeasureView.swift */,
 				6BBF8D252112C7CA095856BD /* ObjectCaptureFlowView.swift */,
 				C0FD7A3C01E78ACC107AEF10 /* ObjectReconstructor.swift */,
+				2A9A4E4FCDBA20EA7619844A /* RemoteBuildService.swift */,
 				36634BBF4BF9036D23B8D57F /* RoomPlanAdapter.swift */,
 				E2CA3B599C8DA730DED1551B /* RoomScanView.swift */,
 			);
@@ -348,6 +354,8 @@
 				C3B3F117DAEC151B1EEF9EA3 /* ObjectReconstructor.swift in Sources */,
 				BC80846EFA3D664DAEC5646D /* PDFPlanRenderer.swift in Sources */,
 				8FDB9AE9FC4DC4B9C1025118 /* PlanCGDrawer.swift in Sources */,
+				1827B6D7343904DE6BDAA237 /* RemoteBuildService.swift in Sources */,
+				F9EFE2AD16F2936AC35284E7 /* RemoteBuildViews.swift in Sources */,
 				1B53745D0BFCAC52E82BDFDF /* RoomPlanAdapter.swift in Sources */,
 				C353C6C4554C26AE79E1F448 /* RoomScanView.swift in Sources */,
 				837D5BAF63662FB99B6830ED /* Router.swift in Sources */,
@@ -402,7 +410,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -513,7 +521,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 6;
+				CURRENT_PROJECT_VERSION = 7;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = "";
 				ENABLE_NS_ASSERTIONS = NO;

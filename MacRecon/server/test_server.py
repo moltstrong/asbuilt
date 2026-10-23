@@ -27,6 +27,7 @@ spec.loader.exec_module(rc)
 FAKE_CLI = r'''#!/bin/bash
 # fake asbuilt-recon: build <zip> --detail D --out OUT --status-file S ... ; sleeps $FAKE_SECONDS
 out=""; status=""
+echo "$@" > "$(dirname "$0")/last-args.txt"
 while [ $# -gt 0 ]; do case "$1" in --out) out="$2"; shift;; --status-file) status="$2"; shift;; esac; shift; done
 mkdir -p "$out"
 for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -38,6 +39,39 @@ echo "fake log" > "$out/recon-log.txt"
 echo '{"ok":true,"polygons":12345,"textures":[{"name":"t.png","width":8192,"height":8192,"bytes":1}],"usdcheckerPassed":true}' > "$out/result.json"
 exit 0
 '''
+
+_rc_download = rc.download
+
+
+# Adapters to the current recon-client.py API (its helpers were reshaped for the e2e report).
+class _QuietReport:
+    def note(self, msg):
+        pass
+
+
+def create_upload(c, path, capture, detail, sha=None, title=None, **extra):
+    body = {"captureID": capture, "filename": os.path.basename(path), "totalBytes": os.path.getsize(path),
+            "sha256": sha or rc.sha256_file(path), "detail": detail}
+    if title:
+        body["title"] = title
+    body.update(extra)
+    return c.request("POST", "/v1/uploads", body)
+
+
+def put_chunks(c, path, up, only=None, log=None):
+    up = dict(up)
+    if only is not None:
+        up["receivedChunks"] = [n for n in range(up["chunkCount"]) if n not in only]
+    rc.upload_chunks(c, path, up, _QuietReport())
+
+
+def download(c, jid, name, dest, interrupt_at=None, log=None):
+    """-> (bytes_this_call, None, X-Content-SHA256, status) like the old helper."""
+    st, n, _, h = _rc_download(c, jid, name, dest, interrupt_at=interrupt_at)
+    return n, None, rc.hdr(h, "X-Content-SHA256") if h else None, st
+
+
+rc.create_upload, rc.put_chunks, rc.download = create_upload, put_chunks, download
 
 PASS, FAIL = [], []
 
@@ -190,6 +224,31 @@ def main():
 
         st, _, lst = c.request("GET", "/v1/jobs?captureID=cap1")
         check("list by captureID", st == 200 and [x["jobID"] for x in lst["jobs"]] == [jid])
+
+        # Phone preset + autoComplete: the phone's background URLSession can't call /complete, so the
+        # server assembles and enqueues as soon as the last chunk lands.
+        st, _, pu = c.request("POST", "/v1/uploads", {"captureID": "cap-phone", "filename": "Images.zip",
+                                                       "totalBytes": os.path.getsize(z), "sha256": sha,
+                                                       "detail": "phone", "autoComplete": True, "title": "Valve"})
+        check("201 phone + autoComplete", st == 201 and pu["detail"] == "phone" and pu["autoComplete"] is True, pu)
+        rc.put_chunks(c, z, pu, log=quiet)
+        pj = None
+        for _ in range(100):
+            st, _, g = c.request("GET", "/v1/uploads/" + pu["uploadID"])
+            if g.get("jobID"):
+                pj = g["jobID"]
+                break
+            time.sleep(0.1)
+        check("upload auto-completed into a job", pj is not None and g["state"] == "completed", g)
+        if pj:
+            st, _, again = c.request("POST", "/v1/uploads/%s/complete" % pu["uploadID"])
+            check("explicit complete after auto-complete is idempotent", st == 200 and again["jobID"] == pj, again)
+            j = wait_state(c, pj, ("done", "failed"))
+            check("phone job done", j["state"] == "done" and j["detail"] == "phone", j)
+            with open(os.path.join(tmp, "last-args.txt")) as fa:
+                last = fa.read()
+            check("phone preset = custom 250k + 8K diffuse/normal jpeg",
+                  "--detail custom --texture 8k --max-polys 250000 --maps diffuse,normal --texture-format jpeg:0.9" in last, last)
 
         # Restart mid-queue: two jobs, slow fake; kill server while job A processes; B queued.
         srv.send_signal(signal.SIGTERM)

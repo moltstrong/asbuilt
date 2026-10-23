@@ -166,6 +166,9 @@ struct ObjectCaptureFlowView: View {
             let capture = Capture(id: captureID, kind: .object, origin: .objectCapture, title: "Object \(number)",
                                   status: .processing, imageCount: count)
             store.addCapture(capture, to: jobID)
+            // Full detail on the owner's Mac starts right away (upload runs while the phone builds its preview).
+            RemoteBuildService.shared.attach(store)
+            RemoteBuildService.shared.start(job: jobID, capture: captureID)
             Task { await reconstruct(reason: "after capture, \(count) shots") }
         case .failed(let error)?:
             session = nil

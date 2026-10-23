@@ -81,11 +81,13 @@ struct Capture: Codable, Identifiable, Hashable, Sendable {
     /// Capture Coach grade at the end of the scan ("A"..."F") and its one-line fix. Added in build 6.
     var coachGrade: String?
     var coachFix: String?
+    /// Object captures: full-detail build on the owner's Mac (upload → build → download), resumable. Build 7.
+    var remoteBuild: RemoteBuild?
 
     init(id: UUID = UUID(), kind: CaptureKind, origin: CaptureOrigin, title: String, createdAt: Date = Date(),
          notes: String = "", status: CaptureStatus = .complete, statusMessage: String? = nil, imageCount: Int? = nil,
          measurements: MeshMeasurements? = nil, reconstructionAttempts: Int? = nil, coachGrade: String? = nil,
-         coachFix: String? = nil) {
+         coachFix: String? = nil, remoteBuild: RemoteBuild? = nil) {
         self.id = id
         self.kind = kind
         self.origin = origin
@@ -99,11 +101,12 @@ struct Capture: Codable, Identifiable, Hashable, Sendable {
         self.reconstructionAttempts = reconstructionAttempts
         self.coachGrade = coachGrade
         self.coachFix = coachFix
+        self.remoteBuild = remoteBuild
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, origin, title, createdAt, notes, status, statusMessage, imageCount, measurements, reconstructionAttempts
-        case coachGrade, coachFix
+        case coachGrade, coachFix, remoteBuild
     }
 
     /// Tolerant decoding: job.json files written by builds 1-4 (no `measurements` /
@@ -123,6 +126,7 @@ struct Capture: Codable, Identifiable, Hashable, Sendable {
         reconstructionAttempts = try c.decodeIfPresent(Int.self, forKey: .reconstructionAttempts)
         coachGrade = try? c.decodeIfPresent(String.self, forKey: .coachGrade)
         coachFix = try? c.decodeIfPresent(String.self, forKey: .coachFix)
+        remoteBuild = (try? c.decodeIfPresent(RemoteBuild.self, forKey: .remoteBuild)) ?? nil
     }
 
     /// Detail scan (TSDF fusion) rather than an ARKit mesh scan.
@@ -192,6 +196,9 @@ struct Job: Codable, Identifiable, Hashable, Sendable {
 enum CaptureFile {
     static let roomUSDZ = "room.usdz"
     static let modelUSDZ = "model.usdz"
+    /// Full-detail object model built on the owner's Mac (250k triangles, 8K textures).
+    static let fullModelUSDZ = "model-full.usdz"
+    static let fullModelLog = "mac-build-log.txt"
     static let roomJSON = "room.json"
     static let planJSON = "plan.json"
     static let dxf = "floorplan.dxf"
@@ -212,6 +219,8 @@ enum CaptureFile {
         switch name {
         case roomUSDZ: return "3D room model (RoomPlan, parametric USDZ). AR Quick Look, Reality Composer, Blender, SketchUp/Revit via USD import."
         case modelUSDZ: return "3D model (USDZ). Opens in AR Quick Look, Reality Composer, Blender, Cinema 4D."
+        case fullModelUSDZ: return "Full-detail 3D model built on your Mac: 250k triangles, 8K photo texture + normal map. AR Quick Look, Blender, Reality Composer."
+        case fullModelLog: return "Mac build log: photo count, Apple's settings, polygon count, texture sizes and timings."
         case roomJSON: return "Raw RoomPlan CapturedRoom JSON for re-processing."
         case planJSON: return "AsBuilt plan data (walls, openings, fixtures) in meters."
         case dxf: return "2D CAD floor plan, DXF R12 with layers. AutoCAD, Revit, SketchUp, BricsCAD."

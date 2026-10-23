@@ -239,9 +239,9 @@ final class JobStore: ObservableObject {
         let dir = captureDirectory(job: jobID, capture: captureID)
         let urls = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey],
                                                 options: [.skipsHiddenFiles])) ?? []
-        let order = [CaptureFile.roomUSDZ, CaptureFile.modelUSDZ, CaptureFile.meshOBJ, CaptureFile.meshMTL, CaptureFile.meshPLY,
+        let order = [CaptureFile.roomUSDZ, CaptureFile.fullModelUSDZ, CaptureFile.modelUSDZ, CaptureFile.meshOBJ, CaptureFile.meshMTL, CaptureFile.meshPLY,
                      CaptureFile.meshCSV, CaptureFile.dxf, CaptureFile.pdf, CaptureFile.csv, CaptureFile.svg,
-                     CaptureFile.reconstructionLog, CaptureFile.coachReport, CaptureFile.roomJSON, CaptureFile.planJSON, CaptureFile.scanInfo,
+                     CaptureFile.reconstructionLog, CaptureFile.fullModelLog, CaptureFile.coachReport, CaptureFile.roomJSON, CaptureFile.planJSON, CaptureFile.scanInfo,
                      CaptureFile.images, CaptureFile.checkpoint]
         return urls
             .filter { !$0.lastPathComponent.hasPrefix(".") }
@@ -254,7 +254,8 @@ final class JobStore: ObservableObject {
 
     func modelURL(job jobID: UUID, capture captureID: UUID) -> URL? {
         let dir = captureDirectory(job: jobID, capture: captureID)
-        for name in [CaptureFile.roomUSDZ, CaptureFile.modelUSDZ] {
+        // The Mac's full-detail build replaces the on-device preview as soon as it lands.
+        for name in [CaptureFile.roomUSDZ, CaptureFile.fullModelUSDZ, CaptureFile.modelUSDZ] {
             let url = dir.appendingPathComponent(name)
             if fm.fileExists(atPath: url.path) { return url }
         }

@@ -404,4 +404,70 @@ final class AsBuiltAppTests: XCTestCase {
         XCTAssertNotNil(data.range(of: Data("Valve-photos/Images/IMG_2.HEIC".utf8)))
         XCTAssertGreaterThan(data.count, 600_000)
     }
+
+    // MARK: Build 7: full-detail Mac builds
+
+    func testRemoteBuildPersistsAndOldJobJSONStillLoads() throws {
+        let store = makeStore()
+        let job = store.createJob(name: "Mac build", address: "", client: "", notes: "")
+        var capture = Capture(kind: .object, origin: .objectCapture, title: "Valve", status: .processing, imageCount: 120)
+        store.addCapture(capture, to: job.id)
+        var build = RemoteBuild(photoCount: 120)
+        build.phase = .building
+        build.uploadID = "up_abc"
+        build.jobID = "job_def"
+        build.phaseProgress = 0.4
+        capture.remoteBuild = build
+        store.updateCapture(capture, in: job.id)
+
+        let reloaded = JobStore(rootURL: root, defaults: defaults)
+        let back = try XCTUnwrap(reloaded.capture(job: job.id, capture: capture.id)?.remoteBuild)
+        XCTAssertEqual(back.phase, .building)
+        XCTAssertEqual(back.jobID, "job_def")
+        XCTAssertTrue(back.isActive)
+
+        // A build-6 job.json (no remoteBuild key) decodes with remoteBuild == nil.
+        let old = #"{"id":"6F1C2D2E-0000-4000-8000-000000000001","kind":"object","origin":"objectCapture","title":"Old","createdAt":"2026-10-01T00:00:00Z","notes":"","status":"complete"}"#
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(Capture.self, from: Data(old.utf8))
+        XCTAssertNil(decoded.remoteBuild)
+    }
+
+    func testFullDetailModelWinsInThe3DTab() throws {
+        let store = makeStore()
+        let job = store.createJob(name: "Prefer full", address: "", client: "", notes: "")
+        let capture = Capture(kind: .object, origin: .objectCapture, title: "Valve", status: .complete, imageCount: 40)
+        store.addCapture(capture, to: job.id)
+        let dir = store.captureDirectory(job: job.id, capture: capture.id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("preview".utf8).write(to: dir.appendingPathComponent(CaptureFile.modelUSDZ))
+        XCTAssertEqual(store.modelURL(job: job.id, capture: capture.id)?.lastPathComponent, CaptureFile.modelUSDZ)
+        try Data("full".utf8).write(to: dir.appendingPathComponent(CaptureFile.fullModelUSDZ))
+        XCTAssertEqual(store.modelURL(job: job.id, capture: capture.id)?.lastPathComponent, CaptureFile.fullModelUSDZ)
+        XCTAssertEqual(store.files(job: job.id, capture: capture.id).first?.lastPathComponent, CaptureFile.fullModelUSDZ)
+        XCTAssertFalse(CaptureFile.description(for: CaptureFile.fullModelUSDZ).isEmpty)
+    }
+
+    func testRemoteBuildServiceIsOffWithoutSecretsAndNeverStartsForSamples() {
+        // Unexpanded placeholders / missing keys (local and CI simulator builds) leave the feature off.
+        let off = RemoteBuildService(info: ["ReconAPIKey": "$(RECON_API_KEY)"])
+        XCTAssertFalse(off.isConfigured)
+        let store = makeStore()
+        store.ensureDemoJob()
+        off.attach(store)
+        off.resumeActive()   // no-op, no crash
+        let on = RemoteBuildService(info: ["ReconAPIKey": String(repeating: "a", count: 64),
+                                           "ReconBaseURL": "https://example.invalid"])
+        XCTAssertTrue(on.isConfigured)
+        on.attach(store)
+        // Sample captures never upload.
+        for job in store.jobs {
+            for capture in job.captures {
+                on.start(job: job.id, capture: capture.id)
+                XCTAssertFalse(on.isRunning(capture.id))
+                XCTAssertNil(store.capture(job: job.id, capture: capture.id)?.remoteBuild)
+            }
+        }
+    }
 }

@@ -141,6 +141,10 @@ run_case 10-coach-far -AsBuiltScreen coach-far
 run_case 11-coach-band -AsBuiltScreen coach-band
 run_case 12-coach-grade -AsBuiltScreen coach-grade
 run_case 13-capabilities -AsBuiltScreen capabilities
+# 6) Build 7: "Full detail on your Mac" card (building / done / offline states).
+run_case 14-mac-build -AsBuiltScreen mac-build
+run_case 15-mac-build-done -AsBuiltScreen mac-build-done
+run_case 16-mac-build-offline -AsBuiltScreen mac-build-offline
 
 DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null || true)
 if [[ -n "$DATA" && -d "$DATA/Documents/Jobs" ]]; then
