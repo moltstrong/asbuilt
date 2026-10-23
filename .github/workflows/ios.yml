@@ -1,0 +1,121 @@
+name: iOS CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Core tests, iOS builds, simulator screenshots
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DERIVED: ${{ github.workspace }}/build/DerivedData
+      SIM_NAME: AsBuilt-CI
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain info
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcode-select -p
+          swift --version
+          xcodebuild -showsdks | grep -E "iphoneos|iphonesimulator"
+          xcrun simctl list runtimes
+          xcrun simctl list devicetypes | grep -E "iPhone 1[5-9]|iPhone 2" || true
+
+      - name: AsBuiltCore unit tests (swift test)
+        working-directory: AsBuiltCore
+        env:
+          ASBUILT_EXPORT_DIR: ${{ github.workspace }}/artifacts/core-exports
+        run: |
+          swift test 2>&1 | tee ../core-tests.log
+          grep -E "Test run with [0-9]+ tests? passed" ../core-tests.log
+
+      - name: Install XcodeGen and generate project
+        run: |
+          brew install xcodegen
+          xcodegen --version
+          cp -R AsBuilt.xcodeproj /tmp/committed.xcodeproj
+          xcodegen generate
+          if ! diff -rq /tmp/committed.xcodeproj AsBuilt.xcodeproj; then
+            echo "::warning::Committed AsBuilt.xcodeproj differs from xcodegen output (non-fatal)."
+          fi
+
+      - name: Create simulator
+        id: sim
+        run: |
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c '
+          import json, sys
+          rs = [r for r in json.load(sys.stdin)["runtimes"] if r["platform"] == "iOS" and r["isAvailable"]]
+          rs.sort(key=lambda r: [int(x) for x in r["version"].split(".")])
+          print(rs[-1]["identifier"])')
+          DEVICE_TYPE=$(xcrun simctl list devicetypes -j | python3 -c '
+          import json, sys
+          names = [d["identifier"] for d in json.load(sys.stdin)["devicetypes"]]
+          prefs = [n for n in names if "iPhone-17-Pro" in n and "Max" not in n] + [n for n in names if "iPhone-16-Pro" in n and "Max" not in n] + [n for n in names if "iPhone" in n]
+          print(prefs[0])')
+          echo "runtime=$RUNTIME device=$DEVICE_TYPE"
+          UDID=$(xcrun simctl create "$SIM_NAME" "$DEVICE_TYPE" "$RUNTIME")
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl list devices | grep "$SIM_NAME"
+
+      - name: Build + test for iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project AsBuilt.xcodeproj -scheme AsBuilt \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath "$DERIVED" \
+            -resultBundlePath build/AppTests.xcresult \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee app-tests.log | grep -E "error:|warning: .*AsBuilt/|Test Case|Executed|TEST (SUCCEEDED|FAILED)|BUILD (SUCCEEDED|FAILED)" || true
+          grep -q "TEST SUCCEEDED" app-tests.log
+
+      - name: Build for iOS device (generic/platform=iOS, unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project AsBuilt.xcodeproj -scheme AsBuilt -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DeviceDerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" 2>&1 | tee device-build.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
+          grep -q "BUILD SUCCEEDED" device-build.log
+          APP=build/DeviceDerivedData/Build/Products/Release-iphoneos/AsBuilt.app
+          ls -la "$APP"
+          file "$APP/AsBuilt"
+          otool -L "$APP/AsBuilt" | grep -E "RoomPlan|RealityKit|RealityFoundation|SceneKit|QuickLook" || true
+          nm -u "$APP/AsBuilt" | grep -c -E "RoomPlan|ObjectCapture|PhotogrammetrySession" || true
+
+      - name: Simulator screenshots
+        run: |
+          APP="$DERIVED/Build/Products/Debug-iphonesimulator/AsBuilt.app"
+          chmod +x scripts/capture-screenshots.sh
+          scripts/capture-screenshots.sh "$APP" "${{ steps.sim.outputs.udid }}" artifacts/screenshots
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: artifacts/screenshots
+          if-no-files-found: warn
+
+      - name: Upload logs and sample exports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-and-exports
+          path: |
+            core-tests.log
+            app-tests.log
+            device-build.log
+            artifacts/core-exports
+          if-no-files-found: warn
