@@ -197,7 +197,8 @@ struct CoachOverlay: View {
                 }
                 Spacer()
             }
-            .padding(.top, 74)
+            // Below the 56 pt top bar + 16 pt padding that every capture screen uses.
+            .padding(.top, 84)
             .allowsHitTesting(false)
             HStack {
                 Spacer()

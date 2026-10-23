@@ -23,48 +23,48 @@ struct CoachPreviewView: View {
     }
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                Color.black
-                if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .clipped()
-                }
-                Canvas { context, size in
-                    for p in tint {
-                        let pt = CGPoint(x: p.u * size.width, y: p.v * size.height)
-                        let r: CGFloat = 5
-                        context.fill(Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: 2 * r, height: 2 * r)),
-                                     with: .color(CoachColors.confidence(p.confidence).opacity(0.8)))
+        // Same layering as DetailScanView: only the "camera" and the tint are full-bleed; the coach
+        // overlay and the bars respect the safe area, so the screenshots match the real scan screen.
+        ZStack {
+            GeometryReader { geo in
+                ZStack {
+                    Color.black
+                    if let image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .clipped()
                     }
+                    Canvas { context, size in
+                        for p in tint {
+                            let pt = CGPoint(x: p.u * size.width, y: p.v * size.height)
+                            let r: CGFloat = 5
+                            context.fill(Path(ellipseIn: CGRect(x: pt.x - r, y: pt.y - r, width: 2 * r, height: 2 * r)),
+                                         with: .color(CoachColors.confidence(p.confidence).opacity(0.8)))
+                        }
+                    }
+                    .allowsHitTesting(false)
                 }
-                .allowsHitTesting(false)
-                if let result {
-                    CoachOverlay(output: result.output, thresholds: result.thresholds, highlightGaps: false,
-                                 isScanning: scenario != .grade)
-                }
-                VStack(spacing: 12) {
-                    topBar
-                    Spacer()
-                    bottomBar
-                }
-                .padding(.horizontal, 16)
-                // Below the Dynamic Island (the ZStack ignores the safe area, so geo's insets read 0 here).
-                .padding(.top, max(geo.safeAreaInsets.top, 59) + 6)
-                .padding(.bottom, max(geo.safeAreaInsets.bottom, 34) + 10)
-                if scenario == .grade, let report = result?.report {
-                    Color.black.opacity(0.35)
-                    GradeCard(report: report, onFillGaps: {}, onDone: {})
-                        .padding()
-                }
+                .onAppear { viewSize = geo.size }
             }
             .ignoresSafeArea()
-            .onAppear { viewSize = geo.size }
+            if let result {
+                CoachOverlay(output: result.output, thresholds: result.thresholds, highlightGaps: false,
+                             isScanning: scenario != .grade)
+            }
+            VStack(spacing: 12) {
+                topBar
+                Spacer()
+                bottomBar
+            }
+            .padding()
+            if scenario == .grade, let report = result?.report {
+                Color.black.opacity(0.35).ignoresSafeArea()
+                GradeCard(report: report, onFillGaps: {}, onDone: {})
+                    .padding()
+            }
         }
-        .ignoresSafeArea()
         .toolbar(.hidden, for: .navigationBar)
         .statusBarHidden()
         .task(id: scenario) { await load() }
