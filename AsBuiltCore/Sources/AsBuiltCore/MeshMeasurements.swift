@@ -115,7 +115,7 @@ public enum MeshNormalizer {
         }
         let shift = SIMD3<Float>((lo.x + hi.x) / 2, lo.y, (lo.z + hi.z) / 2)
         for i in positions.indices { positions[i] -= shift }
-        let out = ClassifiedMesh(positions: positions, normals: normals, groups: mesh.groups)
+        let out = ClassifiedMesh(positions: positions, normals: normals, groups: mesh.groups, colors: mesh.colors)
         var degrees = yaw * 180 / .pi
         if abs(degrees) < 1e-9 { degrees = 0 }
         return Result(mesh: out, measurements: .measure(out, alignmentYawDegrees: degrees), yawRadians: yaw)
@@ -126,9 +126,12 @@ public enum MeshNormalizer {
         var remap = [Int32](repeating: -1, count: mesh.positions.count)
         var positions: [SIMD3<Float>] = []
         var normals: [SIMD3<Float>] = []
+        var colors: [SIMD3<UInt8>] = []
         positions.reserveCapacity(mesh.positions.count)
         let hasNormals = mesh.normals.count == mesh.positions.count
+        let hasColors = mesh.hasVertexColors
         if hasNormals { normals.reserveCapacity(mesh.positions.count) }
+        if hasColors { colors.reserveCapacity(mesh.positions.count) }
         var groups: [ClassifiedMesh.Group] = []
         for group in mesh.groups {
             var indices: [UInt32] = []
@@ -139,12 +142,13 @@ public enum MeshNormalizer {
                     remap[v] = Int32(positions.count)
                     positions.append(mesh.positions[v])
                     if hasNormals { normals.append(mesh.normals[v]) }
+                    if hasColors { colors.append(mesh.colors[v]) }
                 }
                 indices.append(UInt32(remap[v]))
             }
             if !indices.isEmpty { groups.append(.init(classification: group.classification, indices: indices)) }
         }
-        return ClassifiedMesh(positions: positions, normals: normals, groups: groups)
+        return ClassifiedMesh(positions: positions, normals: normals, groups: groups, colors: colors)
     }
 
     /// Yaw (radians, about +Y) that turns the minimum-area bounding rectangle of the XZ footprint so

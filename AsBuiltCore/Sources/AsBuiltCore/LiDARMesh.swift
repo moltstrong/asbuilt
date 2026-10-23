@@ -72,12 +72,19 @@ public struct ClassifiedMesh: Sendable {
     public var normals: [SIMD3<Float>]
     /// Non-empty groups in `MeshClass.exportOrder`.
     public var groups: [Group]
+    /// Optional per-vertex sRGB colors (same count as `positions`), e.g. from TSDF depth fusion.
+    /// Empty = color by surface class.
+    public var colors: [SIMD3<UInt8>]
 
-    public init(positions: [SIMD3<Float>], normals: [SIMD3<Float>], groups: [Group]) {
+    public init(positions: [SIMD3<Float>], normals: [SIMD3<Float>], groups: [Group], colors: [SIMD3<UInt8>] = []) {
         self.positions = positions
         self.normals = normals
         self.groups = groups
+        self.colors = colors
     }
+
+    /// True when every vertex has a color.
+    public var hasVertexColors: Bool { !colors.isEmpty && colors.count == positions.count }
 
     public var vertexCount: Int { positions.count }
     public var triangleCount: Int { groups.reduce(0) { $0 + $1.triangleCount } }
@@ -102,15 +109,27 @@ public struct ClassifiedMesh: Sendable {
         return any ? (lo, hi) : nil
     }
 
+    /// One compact, self-contained part of a `ClassifiedMesh` (see `compactParts()`).
+    public struct Part: Sendable {
+        public var classification: MeshClass
+        public var positions: [SIMD3<Float>]
+        public var normals: [SIMD3<Float>]
+        /// Per-vertex colors, or empty.
+        public var colors: [SIMD3<UInt8>]
+        public var indices: [UInt32]
+    }
+
     /// Splits the shared vertex pool into one compact, self-contained part per group (only the
     /// vertices each group uses, re-indexed from 0). Used by writers that want one mesh prim per class.
-    public func compactParts() -> [(classification: MeshClass, positions: [SIMD3<Float>], normals: [SIMD3<Float>], indices: [UInt32])] {
+    public func compactParts() -> [Part] {
         var remap = [Int32](repeating: -1, count: positions.count)
-        var result: [(classification: MeshClass, positions: [SIMD3<Float>], normals: [SIMD3<Float>], indices: [UInt32])] = []
+        var result: [Part] = []
         let hasNormals = normals.count == positions.count
+        let hasColors = hasVertexColors
         for group in groups where !group.indices.isEmpty {
             var pts: [SIMD3<Float>] = []
             var nrm: [SIMD3<Float>] = []
+            var col: [SIMD3<UInt8>] = []
             var idx: [UInt32] = []
             var touched: [Int] = []
             pts.reserveCapacity(group.indices.count / 2)
@@ -124,12 +143,13 @@ public struct ClassifiedMesh: Sendable {
                     remap[v] = r
                     pts.append(positions[v])
                     if hasNormals { nrm.append(normals[v]) }
+                    if hasColors { col.append(colors[v]) }
                     touched.append(v)
                 }
                 idx.append(UInt32(r))
             }
             for v in touched { remap[v] = -1 }
-            result.append((group.classification, pts, nrm, idx))
+            result.append(Part(classification: group.classification, positions: pts, normals: nrm, colors: col, indices: idx))
         }
         return result
     }

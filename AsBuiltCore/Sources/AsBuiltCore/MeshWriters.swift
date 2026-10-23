@@ -8,15 +8,24 @@ public struct USDMaterialSpec: Sendable, Hashable {
     public var b: Double
     public var opacity: Double
     public var roughness: Double
+    /// When true, `diffuseColor` is driven by the mesh's `displayColor` primvar through a
+    /// `UsdPrimvarReader_float3` (vertex-colored scans); `r/g/b` is the reader's fallback.
+    public var usesDisplayColor: Bool
 
-    public init(name: String, r: Double, g: Double, b: Double, opacity: Double = 1, roughness: Double = 0.85) {
+    public init(name: String, r: Double, g: Double, b: Double, opacity: Double = 1, roughness: Double = 0.85,
+                usesDisplayColor: Bool = false) {
         self.name = name
         self.r = r
         self.g = g
         self.b = b
         self.opacity = opacity
         self.roughness = roughness
+        self.usesDisplayColor = usesDisplayColor
     }
+
+    /// Material for vertex-colored (fused) scans.
+    public static let vertexColor = USDMaterialSpec(name: "VertexColor", r: 0.8, g: 0.8, b: 0.8, roughness: 0.9,
+                                                    usesDisplayColor: true)
 }
 
 /// An arbitrary indexed triangle mesh for the USDA writer (world space, meters, +Y up).
@@ -29,15 +38,19 @@ public struct USDIndexedMesh: Sendable {
     /// Triangle list, three indices per face, 0-based into `positions`.
     public var indices: [UInt32]
     public var doubleSided: Bool
+    /// Optional per-vertex sRGB colors (same count as `positions`), written as
+    /// `primvars:displayColor` with vertex interpolation.
+    public var colors: [SIMD3<UInt8>]
 
     public init(name: String, materialName: String, positions: [SIMD3<Float>], normals: [SIMD3<Float>] = [],
-                indices: [UInt32], doubleSided: Bool = false) {
+                indices: [UInt32], doubleSided: Bool = false, colors: [SIMD3<UInt8>] = []) {
         self.name = name
         self.materialName = materialName
         self.positions = positions
         self.normals = normals
         self.indices = indices
         self.doubleSided = doubleSided
+        self.colors = colors
     }
 
     public var triangleCount: Int { indices.count / 3 }
@@ -101,11 +114,24 @@ extension USDAWriter {
         out.append("            token outputs:surface.connect = <\(path)/PreviewSurface.outputs:surface>\n\n")
         out.append("            def Shader \"PreviewSurface\"\n            {\n")
         out.append("                uniform token info:id = \"UsdPreviewSurface\"\n")
-        out.append("                color3f inputs:diffuseColor = (\(num(spec.r)), \(num(spec.g)), \(num(spec.b)))\n")
+        if spec.usesDisplayColor {
+            out.append("                color3f inputs:diffuseColor.connect = <\(path)/DisplayColor.outputs:result>\n")
+        } else {
+            out.append("                color3f inputs:diffuseColor = (\(num(spec.r)), \(num(spec.g)), \(num(spec.b)))\n")
+        }
         out.append("                float inputs:metallic = 0\n")
         out.append("                float inputs:opacity = \(num(spec.opacity))\n")
         out.append("                float inputs:roughness = \(num(spec.roughness))\n")
-        out.append("                token outputs:surface\n            }\n        }\n")
+        out.append("                token outputs:surface\n            }\n")
+        if spec.usesDisplayColor {
+            // Reads the mesh's `displayColor` primvar (per-vertex fused color).
+            out.append("\n            def Shader \"DisplayColor\"\n            {\n")
+            out.append("                uniform token info:id = \"UsdPrimvarReader_float3\"\n")
+            out.append("                float3 inputs:fallback = (\(num(spec.r)), \(num(spec.g)), \(num(spec.b)))\n")
+            out.append("                string inputs:varname = \"displayColor\"\n")
+            out.append("                float3 outputs:result\n            }\n")
+        }
+        out.append("        }\n")
     }
 
     private static func writeIndexedMesh(_ mesh: USDIndexedMesh, prim: String, materialPath: String?,
@@ -150,6 +176,18 @@ extension USDAWriter {
         out.append("]\n")
         if let materialPath { out.append("            rel material:binding = <\(materialPath)>\n") }
 
+        if mesh.colors.count == mesh.positions.count, !mesh.colors.isEmpty {
+            out.append("            color3f[] primvars:displayColor = [")
+            for (i, c) in mesh.colors.enumerated() {
+                if i > 0 {
+                    out.append(UInt8(ascii: ","))
+                    out.append(UInt8(ascii: " "))
+                }
+                appendVec(SIMD3<Float>(USDAWriter.srgbToLinear[Int(c.x)], USDAWriter.srgbToLinear[Int(c.y)], USDAWriter.srgbToLinear[Int(c.z)]),
+                          decimals: 4, into: &out)
+            }
+            out.append("] (\n                interpolation = \"vertex\"\n            )\n")
+        }
         if mesh.normals.count == mesh.positions.count {
             out.append("            normal3f[] normals = [")
             appendVecList(mesh.normals, decimals: 4, into: &out)
@@ -174,6 +212,12 @@ extension USDAWriter {
         out.append(UInt8(ascii: ")"))
     }
 
+    /// sRGB 8-bit -> linear (USD color attributes are linear).
+    static let srgbToLinear: [Float] = (0..<256).map { i in
+        let c = Double(i) / 255
+        return Float(c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4))
+    }
+
     static func appendVecList(_ list: [SIMD3<Float>], decimals: Int, into out: inout ByteBuffer) {
         for (i, v) in list.enumerated() {
             if i > 0 {
@@ -187,12 +231,15 @@ extension USDAWriter {
     /// One material per class, one mesh prim per non-empty class group.
     public static func write(classifiedMesh mesh: ClassifiedMesh, name: String) -> Data {
         let parts = mesh.compactParts()
+        let colored = mesh.hasVertexColors
         let meshes = parts.map {
-            USDIndexedMesh(name: $0.classification.name, materialName: $0.classification.name,
-                           positions: $0.positions, normals: $0.normals, indices: $0.indices, doubleSided: false)
+            USDIndexedMesh(name: $0.classification.name, materialName: colored ? USDMaterialSpec.vertexColor.name : $0.classification.name,
+                           positions: $0.positions, normals: $0.normals, indices: $0.indices, doubleSided: false,
+                           colors: $0.colors)
         }
-        return write(indexedMeshes: meshes, materials: MeshClass.exportOrder.map(\.usdMaterial), rootPrimName: "Scan",
-                     doc: "AsBuilt LiDAR mesh scan: \(name)")
+        let materials = colored ? [USDMaterialSpec.vertexColor] : MeshClass.exportOrder.map(\.usdMaterial)
+        return write(indexedMeshes: meshes, materials: materials, rootPrimName: "Scan",
+                     doc: colored ? "AsBuilt Detail scan (fused LiDAR depth, vertex colors): \(name)" : "AsBuilt LiDAR mesh scan: \(name)")
     }
 }
 
@@ -220,6 +267,7 @@ public enum OBJWriter {
         out.append("# AsBuilt LiDAR mesh scan: ")
         out.append(name.replacingOccurrences(of: "\n", with: " "))
         out.append("\n# Units: meters. Up axis: +Y. Faces are counter-clockwise triangles.\n")
+        if mesh.hasVertexColors { out.append("# Vertex colors: v x y z r g b (0-1, sRGB).\n") }
         out.append("# Vertices: ")
         out.append(int: v)
         out.append("  Triangles: ")
@@ -227,13 +275,24 @@ public enum OBJWriter {
         out.append("\nmtllib ")
         out.append(mtlFileName)
         out.append("\no AsBuiltScan\n")
-        for p in mesh.positions {
+        let colored = mesh.hasVertexColors
+        for (i, p) in mesh.positions.enumerated() {
             out.append("v ")
             out.append(fixed: p.x, decimals: 5)
             out.append(UInt8(ascii: " "))
             out.append(fixed: p.y, decimals: 5)
             out.append(UInt8(ascii: " "))
             out.append(fixed: p.z, decimals: 5)
+            if colored {
+                // De-facto "v x y z r g b" vertex-color extension (MeshLab, CloudCompare, Blender 4.x).
+                let c = mesh.colors[i]
+                out.append(UInt8(ascii: " "))
+                out.append(fixed: Double(c.x) / 255, decimals: 4)
+                out.append(UInt8(ascii: " "))
+                out.append(fixed: Double(c.y) / 255, decimals: 4)
+                out.append(UInt8(ascii: " "))
+                out.append(fixed: Double(c.z) / 255, decimals: 4)
+            }
             out.append(UInt8(ascii: "\n"))
         }
         let hasNormals = mesh.normals.count == v
@@ -291,8 +350,9 @@ public enum OBJWriter {
     }
 }
 
-/// Binary little-endian PLY: float xyz, float normals, uchar rgb per vertex (colored by the class of
-/// the first face that uses it), uchar-count / uint-index triangle list.
+/// Binary little-endian PLY: float xyz, float normals, uchar red/green/blue per vertex (the fused
+/// vertex color when the mesh has one, else the class color of the first face that uses it),
+/// uchar-count / uint-index triangle list.
 public enum PLYWriter {
     public static func header(vertexCount: Int, faceCount: Int, comment: String) -> String {
         """
@@ -326,6 +386,14 @@ public enum PLYWriter {
         let f = mesh.triangleCount
         var colors = [UInt8](repeating: 255, count: v * 3)
         var assigned = [Bool](repeating: false, count: v)
+        if mesh.hasVertexColors {
+            for (i, c) in mesh.colors.enumerated() {
+                colors[3 * i] = c.x
+                colors[3 * i + 1] = c.y
+                colors[3 * i + 2] = c.z
+                assigned[i] = true
+            }
+        }
         for group in mesh.groups {
             let c = group.classification.color
             let rgb = [UInt8(clamping: Int(c.r * 255)), UInt8(clamping: Int(c.g * 255)), UInt8(clamping: Int(c.b * 255))]
