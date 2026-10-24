@@ -70,23 +70,65 @@ fun ModelViewer(source: ModelSource, modifier: Modifier = Modifier, onStatus: (S
     var state by remember(source) { mutableStateOf<String?>("Loading model…") }
     var error by remember(source) { mutableStateOf<String?>(null) }
 
+    // Async texture decode: Filament's ResourceLoader decodes on its job threads and finalises a little
+    // every frame (asyncUpdateLoad in onFrame), so 4K/8K textures never block the main thread (no ANR).
+    var pending by remember(source) { mutableStateOf<com.google.android.filament.gltfio.FilamentAsset?>(null) }
+    var loadedAsset by remember(source) { mutableStateOf<com.google.android.filament.gltfio.FilamentAsset?>(null) }
+    var percent by remember(source) { mutableStateOf(0) }
+    // Keeps the (memory-mapped) GLB alive until Filament has finished reading it.
+    val keepAlive = remember(source) { arrayOfNulls<ByteBuffer>(1) }
+
     LaunchedEffect(source) {
         try {
             val buffer = withContext(Dispatchers.IO) { readBuffer(source, context) }
+            keepAlive[0] = buffer
             // Filament objects must be created on the main thread.
-            val instance = modelLoader.createModelInstance(buffer)
-            val node = ModelNode(modelInstance = instance, scaleToUnits = 1.0f, centerOrigin = Position(0f, 0f, 0f))
-            childNodes.clear()
-            childNodes.add(node)
-            state = null
-            Log.i("AsBuiltViewer", "model loaded: ${buffer.capacity()} bytes")
-            onStatus("loaded")
+            val asset = modelLoader.assetLoader.createAsset(buffer) ?: throw IllegalStateException("not a glTF/GLB")
+            modelLoader.resourceLoader.asyncBeginLoad(asset)
+            pending = asset
+            state = "Loading textures…"
         } catch (e: Throwable) {
             Log.e("AsBuiltViewer", "model load failed", e)
             error = when (e) {
                 is OutOfMemoryError -> "This model is too big for this phone's memory. Build it again with 2K or 4K textures (Settings)."
                 else -> "Couldn't open this model (${e.javaClass.simpleName})."
             }
+            state = null
+            onStatus("error")
+        }
+    }
+    androidx.compose.runtime.DisposableEffect(source) {
+        onDispose {
+            try {
+                modelLoader.resourceLoader.asyncCancelLoad()
+                childNodes.forEach { it.destroy() }
+                childNodes.clear()
+                (loadedAsset ?: pending)?.let { modelLoader.assetLoader.destroyAsset(it) }
+            } catch (_: Throwable) {
+            }
+        }
+    }
+
+    fun onFrame() {
+        val asset = pending ?: return
+        try {
+            modelLoader.resourceLoader.asyncUpdateLoad()
+            val p = modelLoader.resourceLoader.asyncGetLoadProgress()
+            percent = (p * 100).toInt()
+            if (p >= 1f) {
+                pending = null
+                keepAlive[0] = null
+                val node = ModelNode(modelInstance = asset.instance, scaleToUnits = 1.0f, centerOrigin = Position(0f, 0f, 0f))
+                childNodes.clear()
+                childNodes.add(node)
+                loadedAsset = asset
+                state = null
+                onStatus("loaded")
+            }
+        } catch (e: Throwable) {
+            Log.e("AsBuiltViewer", "texture load failed", e)
+            pending = null
+            error = "Couldn't finish loading this model (${e.javaClass.simpleName})."
             state = null
             onStatus("error")
         }
@@ -107,9 +149,10 @@ fun ModelViewer(source: ModelSource, modifier: Modifier = Modifier, onStatus: (S
                     orbitHomePosition = Position(0f, 0.15f, 1.6f),
                     targetPosition = Position(0f, 0f, 0f),
                 ),
+                onFrame = { onFrame() },
             )
         }
-        val msg = error ?: state
+        val msg = error ?: state?.let { if (pending != null && percent > 0) "$it $percent%" else it }
         if (msg != null) {
             Column(
                 Modifier.align(Alignment.Center).padding(32.dp),
