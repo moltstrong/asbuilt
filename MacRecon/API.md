@@ -79,18 +79,24 @@ Request:
 | `texture` | `4k` \| `8k` | no (default `8k`) | used for `custom` |
 | `maxPolygons` | int | no | `custom` only, 10,000-20,000,000, default 1,000,000. **Apple clamps it to 250,000 on this Mac**; use `raw` for more geometry |
 | `obj` | bool | no (default false) | also produce `model-obj.zip` (OBJ+MTL+textures) |
+| `glb` | bool | no (default false) | also produce `model.glb` (binary glTF 2.0, for Android/Filament/SceneView and the web): the same mesh as `model.usdz` with its diffuse (`baseColorTexture`), normal (`normalTexture`) and, if built, AO (`occlusionTexture`) maps embedded. Converted from the OBJ output, so the build runs with OBJ export; `model-obj.zip` is only kept and listed when `obj` is also true. A conversion failure never fails the job: the job is still `done` with `model.usdz`, no `model.glb` in `files`, and `glbError` set |
+| `glbTextureSize` | int | no | `glb` only: cap the embedded textures' longest side at 1024, 2048, 4096 or 8192 px (re-encoded as JPEG q0.9). Default: keep the build's size (8K for `phone`) |
 | `title` | string | no | ≤120 chars, shown in the iMessage notification |
 | `notify` | bool | no (default true) | iMessage the owner when the job is done or failed |
 | `chunkSize` | int | no | 4-64 MiB, multiple of 1 MiB |
 
 The zip is AsBuilt's photo export: the `Images/` folder of Object Capture HEICs (STORE zip is fine,
-since HEIC/JPEG are already compressed). The server finds the image folder anywhere inside the zip.
+since HEIC/JPEG are already compressed). The server finds the image folder anywhere inside the zip
+(the folder holding the most HEIC/JPEG/PNG/TIFF files; other files such as `poses.json` are ignored).
+The Android app sends `Images/IMG_0001.jpg …` (full-resolution JPEGs with EXIF focal length) plus
+`poses.json` (ARCore camera pose + intrinsics per photo, see `Android/README.md`) in a STORE zip, with
+`detail: "phone"`, `autoComplete: true`, `glb: true`, `chunkSize: 8388608`.
 
 201 (also the shape of `GET /v1/uploads/{id}`):
 ```json
 {"uploadID": "up_8c1…", "captureID": "6F1C…", "filename": "Images.zip", "totalBytes": 168396531,
  "sha256": "…", "chunkSize": 33554432, "chunkCount": 6, "receivedChunks": [], "receivedBytes": 0,
- "state": "open", "jobID": null, "detail": "full",
+ "state": "open", "jobID": null, "detail": "full", "autoComplete": false, "obj": true, "glb": false,
  "createdAt": "2026-10-23T19:14:20Z", "expiresAt": "2026-10-30T19:14:20Z"}
 ```
 Errors: 400 `invalid_field` (+`field`), 400 `invalid_json`, 413 `upload_too_large` (+`maxBytes`, `totalBytes`),
@@ -148,7 +154,8 @@ For multi-GB files this takes a few seconds (≈0.2 s for 168 MB), so use a 120 
 | `message` | plain language, ready to show |
 | `polygons`, `textures` | when `done`: triangle count and `[{name, width, height}]` |
 | `error` | when `failed`: `{"code": "build_failed", "message": "<plain language, e.g. photos couldn't be aligned>", "exitCode": 1, "technical": "<Apple error dump>"}` |
-| `files` | when `done`: `model.usdz`, `recon-log.txt`, `thumbnail.png`, and `model-obj.zip` if `obj`. Each is `{name, bytes, sha256, url}`, where `url` is relative to the base URL. Before `done` only the live `recon-log.txt` (sha `null`) is listed |
+| `glb`, `glbInfo`, `glbError` | `glb` echoes the upload option. When `done` with a GLB: `glbInfo` = `{triangles, vertices, bytes, textures: [{name, mimeType}]}`. If the conversion failed: `glbError` = `{code: "glb_failed", message}` (the USDZ is still there) |
+| `files` | when `done`: `model.usdz`, `recon-log.txt`, `thumbnail.png`, `model-obj.zip` if `obj`, and `model.glb` if `glb`. Each is `{name, bytes, sha256, url}`, where `url` is relative to the base URL. Before `done` only the live `recon-log.txt` (sha `null`) is listed |
 
 404 `job_not_found` means it was deleted or expired.
 
@@ -160,9 +167,9 @@ to re-find work for a capture. If the list is empty, also check any upload you r
 Cancels a running build (it stops within about 10 s) or removes a finished one and its files.
 
 ### `GET /v1/jobs/{jobID}/files/{name}` → 200 / 206
-`name` ∈ `model.usdz` | `model-obj.zip` | `recon-log.txt` | `thumbnail.png`. `HEAD` is supported.
+`name` ∈ `model.usdz` | `model-obj.zip` | `model.glb` | `recon-log.txt` | `thumbnail.png`. `HEAD` is supported.
 - Headers: `Content-Length`, `Accept-Ranges: bytes`, `ETag: "<sha256>"`, `X-Content-SHA256: <sha256>`,
-  `Content-Type` (`model/vnd.usdz+zip`, `application/zip`, `text/plain; charset=utf-8`, `image/png`).
+  `Content-Type` (`model/vnd.usdz+zip`, `application/zip`, `model/gltf-binary`, `text/plain; charset=utf-8`, `image/png`).
 - **Range**: `Range: bytes=<start>-` (or `start-end`, or `-suffix`) → **206** with `Content-Range: bytes s-e/total`.
   Send `If-Range: "<sha256>"` so that if the file changed you get a full 200 instead of a wrong splice.
   Start beyond the end → **416** with `Content-Range: bytes */<total>` and an empty body.
@@ -233,7 +240,17 @@ Job failure is not an HTTP error: the job reads `state: "failed"` with `error.me
 "Apple's photogrammetry couldn't line up the photos … Re-shoot with 3 slow passes …". The Mac has already retried once
 with sequential ordering, high sensitivity and no masking before reporting failure.
 
-## 8. iOS implementation notes
+## 8. Android implementation notes (`Android/`)
+
+- Same flow and resume rules as §5, in `Android/core` (pure Kotlin/JVM, unit tested with MockWebServer):
+  8 MiB chunks, 3 in flight, per-chunk retry with backoff (2…60 s), Cloudflare HTML / 5xx / 429 / IO errors are
+  retryable, 401/404/413 are fatal, `waitingForMac` after repeated failures, discovery re-resolve on any
+  connection failure, `model.glb` downloaded with Range resume and sha256-verified.
+- Runs in a foreground service (`dataSync`) with a progress notification, so it survives backgrounding.
+- The API key / base URL / discovery URL are `BuildConfig` fields injected by `.github/workflows/android.yml`
+  from the same GitHub secrets; a Settings override is stored with `EncryptedSharedPreferences`.
+
+## 9. iOS implementation notes
 
 - **Uploads**: background `URLSessionConfiguration.background(withIdentifier: "com.asbuilt.recon.upload")`,
   `isDiscretionary = false`, `sessionSendsLaunchEvents = true`, and `allowsCellularAccess` per user setting.

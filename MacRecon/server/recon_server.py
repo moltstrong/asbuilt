@@ -62,13 +62,16 @@ DETAILS = ("full", "raw", "custom", "phone")
 PHONE_PRESET = ["--detail", "custom", "--texture", "8k", "--max-polys", "250000",
                 "--maps", "diffuse,normal", "--texture-format", "jpeg:0.9"]
 TEXTURES = ("4k", "8k")
-FILE_NAMES = ("model.usdz", "model-obj.zip", "recon-log.txt", "thumbnail.png")
+FILE_NAMES = ("model.usdz", "model-obj.zip", "model.glb", "recon-log.txt", "thumbnail.png")
 CONTENT_TYPES = {
     "model.usdz": "model/vnd.usdz+zip",
     "model-obj.zip": "application/zip",
+    "model.glb": "model/gltf-binary",
     "recon-log.txt": "text/plain; charset=utf-8",
     "thumbnail.png": "image/png",
 }
+# `glbTextureSize`: optional cap (px, longest side) for the textures embedded in model.glb.
+GLB_TEXTURE_SIZES = (1024, 2048, 4096, 8192)
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -114,6 +117,260 @@ def sha256_file(path):
                 break
             h.update(b)
     return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------------------------
+# OBJ -> GLB (glTF 2.0 binary) for clients that can't open USDZ (Android: Filament/SceneView).
+# Pure stdlib: parses Apple's OBJ+MTL output (v/vt/vn, one or more usemtl groups), de-indexes the
+# v/vt/vn triples into glTF vertices, embeds the diffuse / normal / AO maps as JPEG or PNG, and
+# writes one mesh with one primitive per material. Textures can be capped with `sips -Z` (macOS).
+
+_GLB_MIME = {b"\xff\xd8\xff": "image/jpeg", b"\x89PNG": "image/png"}
+
+
+def _sniff_mime(data):
+    for magic, mime in _GLB_MIME.items():
+        if data.startswith(magic):
+            return mime
+    return None
+
+
+def _parse_mtl(path):
+    """{material: {"diffuse": file, "normal": file, "ao": file}} from an MTL file (missing = {})."""
+    mats, cur = {}, None
+    try:
+        with open(path, errors="replace") as f:
+            for raw in f:
+                parts = raw.strip().split(None, 1)
+                if len(parts) < 2:
+                    continue
+                k, v = parts[0], parts[1].strip()
+                if k == "newmtl":
+                    cur = mats.setdefault(v, {})
+                elif cur is not None:
+                    # Texture options (-bm 1 file) precede the file name: keep the last token.
+                    name = v.split()[-1] if v else v
+                    if k == "map_Kd":
+                        cur["diffuse"] = name
+                    elif k in ("norm", "map_Bump", "map_bump", "bump", "map_Kn"):
+                        cur.setdefault("normal", name)
+                    elif k in ("map_ao", "map_Ka") and "ao" not in cur:
+                        cur["ao"] = name
+    except OSError:
+        pass
+    return mats
+
+
+def _load_texture(path, max_size=None, tmp_dir=None):
+    """Bytes + mime of a texture, re-encoded by sips when it must shrink or is a huge PNG."""
+    src = path
+    if tmp_dir and sys.platform == "darwin" and os.path.exists("/usr/bin/sips"):
+        try:
+            big_png = path.lower().endswith(".png") and os.path.getsize(path) > 4 * MiB
+            w = None
+            if max_size:
+                r = subprocess.run(["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", path], capture_output=True, text=True, timeout=60)
+                dims = [int(x) for x in re.findall(r"pixel(?:Width|Height):\s*(\d+)", r.stdout)]
+                w = max(dims) if dims else None
+            if big_png or (max_size and w and w > max_size):
+                out = os.path.join(tmp_dir, os.path.splitext(os.path.basename(path))[0] + ".jpg")
+                cmd = ["/usr/bin/sips", "-s", "format", "jpeg", "-s", "formatOptions", "90"]
+                if max_size and w and w > max_size:
+                    cmd += ["-Z", str(max_size)]
+                r = subprocess.run(cmd + [path, "--out", out], capture_output=True, text=True, timeout=300)
+                if r.returncode == 0 and os.path.isfile(out):
+                    src = out
+        except (OSError, subprocess.SubprocessError, ValueError):
+            src = path
+    with open(src, "rb") as f:
+        data = f.read()
+    mime = _sniff_mime(data)
+    if not mime:
+        raise ValueError("texture %s is not a JPEG or PNG" % os.path.basename(path))
+    return data, mime
+
+
+def obj_to_glb(obj_dir, dest, max_texture=None, generator="asbuilt-recon"):
+    """Converts the single .obj in `obj_dir` to a binary glTF at `dest`. Returns stats."""
+    import array
+    import struct
+    import tempfile
+    objs = sorted(n for n in os.listdir(obj_dir) if n.lower().endswith(".obj"))
+    if not objs:
+        raise ValueError("no .obj file in %s" % obj_dir)
+    obj_path = os.path.join(obj_dir, objs[-1])
+    t0 = time.time()
+    pos, uv, nrm = [], [], []
+    mtllib = None
+    groups = {}          # material -> array('I') of glTF vertex indices
+    order = []
+    current = None
+    vmap = {}
+    out_p, out_t, out_n = array.array("f"), array.array("f"), array.array("f")
+    has_t = has_n = None
+    faces = 0
+    with open(obj_path, errors="replace") as f:
+        for line in f:
+            if not line or line[0] == "#":
+                continue
+            c0 = line[0]
+            if c0 == "v":
+                c1 = line[1]
+                if c1 == " ":
+                    p = line.split()
+                    pos.append((float(p[1]), float(p[2]), float(p[3])))
+                elif c1 == "t":
+                    p = line.split()
+                    uv.append((float(p[1]), 1.0 - float(p[2]) if len(p) > 2 else 1.0))
+                elif c1 == "n":
+                    p = line.split()
+                    nrm.append((float(p[1]), float(p[2]), float(p[3])))
+                continue
+            if c0 == "f":
+                toks = line.split()[1:]
+                if len(toks) < 3:
+                    continue
+                if current is None:
+                    current = ""
+                    groups[current] = array.array("I")
+                    order.append(current)
+                idx = []
+                for tok in toks:
+                    key = tok
+                    if "-" in tok:  # relative indices: resolve so the key is absolute
+                        parts = tok.split("/")
+                        lens = (len(pos), len(uv), len(nrm))
+                        key = "/".join(str(int(x) + lens[i] + 1) if x.startswith("-") else x for i, x in enumerate(parts))
+                    gi = vmap.get(key)
+                    if gi is None:
+                        parts = key.split("/")
+                        vi = int(parts[0]) - 1
+                        ti = int(parts[1]) - 1 if len(parts) > 1 and parts[1] else -1
+                        ni = int(parts[2]) - 1 if len(parts) > 2 and parts[2] else -1
+                        if has_t is None:
+                            has_t, has_n = ti >= 0, ni >= 0
+                        gi = len(out_p) // 3
+                        out_p.extend(pos[vi])
+                        if has_t:
+                            out_t.extend(uv[ti] if ti >= 0 else (0.0, 0.0))
+                        if has_n:
+                            out_n.extend(nrm[ni] if ni >= 0 else (0.0, 1.0, 0.0))
+                        vmap[key] = gi
+                    idx.append(gi)
+                g = groups[current]
+                for k in range(1, len(idx) - 1):  # fan-triangulate quads/ngons
+                    g.extend((idx[0], idx[k], idx[k + 1]))
+                    faces += 1
+                continue
+            if line.startswith("usemtl"):
+                current = line.split(None, 1)[1].strip() if len(line.split(None, 1)) > 1 else ""
+                if current not in groups:
+                    groups[current] = array.array("I")
+                    order.append(current)
+            elif line.startswith("mtllib"):
+                mtllib = line.split(None, 1)[1].strip()
+    nverts = len(out_p) // 3
+    if nverts == 0 or faces == 0:
+        raise ValueError("%s has no faces" % os.path.basename(obj_path))
+    parse_secs = time.time() - t0
+    mats = _parse_mtl(os.path.join(obj_dir, mtllib)) if mtllib else {}
+    if sys.byteorder != "little":
+        for a in (out_p, out_t, out_n):
+            a.byteswap()
+
+    bin_parts, views, accessors = [], [], []
+    offset = [0]
+
+    def add_view(data, target=None):
+        pad = (-len(data)) % 4
+        bv = {"buffer": 0, "byteOffset": offset[0], "byteLength": len(data)}
+        if target:
+            bv["target"] = target
+        bin_parts.append(data + b"\0" * pad)
+        offset[0] += len(data) + pad
+        views.append(bv)
+        return len(views) - 1
+
+    mins = [min(out_p[i::3]) for i in range(3)]
+    maxs = [max(out_p[i::3]) for i in range(3)]
+    accessors.append({"bufferView": add_view(out_p.tobytes(), 34962), "componentType": 5126, "count": nverts,
+                      "type": "VEC3", "min": mins, "max": maxs})
+    attrs = {"POSITION": 0}
+    if has_n:
+        accessors.append({"bufferView": add_view(out_n.tobytes(), 34962), "componentType": 5126, "count": nverts, "type": "VEC3"})
+        attrs["NORMAL"] = len(accessors) - 1
+    if has_t:
+        accessors.append({"bufferView": add_view(out_t.tobytes(), 34962), "componentType": 5126, "count": nverts, "type": "VEC2"})
+        attrs["TEXCOORD_0"] = len(accessors) - 1
+
+    images, textures, materials, prims, tex_info = [], [], [], [], []
+    image_cache = {}
+    tmp = tempfile.mkdtemp(prefix="glb-", dir=os.path.dirname(os.path.abspath(dest)))
+    try:
+        def texture(name):
+            if not name or not has_t:
+                return None
+            path = os.path.join(obj_dir, os.path.basename(name))
+            if not os.path.isfile(path):
+                return None
+            if path not in image_cache:
+                data, mime = _load_texture(path, max_texture, tmp)
+                images.append({"bufferView": add_view(data), "mimeType": mime, "name": os.path.basename(path)})
+                textures.append({"source": len(images) - 1, "sampler": 0})
+                image_cache[path] = len(textures) - 1
+                tex_info.append({"name": os.path.basename(path), "mimeType": mime, "bytes": len(data)})
+            return image_cache[path]
+
+        for name in order:
+            ind = groups[name]
+            if not len(ind):
+                continue
+            m = mats.get(name) or (next(iter(mats.values())) if len(mats) == 1 else {})
+            mat = {"name": name or "material", "pbrMetallicRoughness": {"metallicFactor": 0.0, "roughnessFactor": 1.0}}
+            d = texture(m.get("diffuse"))
+            if d is not None:
+                mat["pbrMetallicRoughness"]["baseColorTexture"] = {"index": d}
+            n = texture(m.get("normal")) if has_n else None
+            if n is not None:
+                mat["normalTexture"] = {"index": n}
+            o = texture(m.get("ao"))
+            if o is not None:
+                mat["occlusionTexture"] = {"index": o}
+            materials.append(mat)
+            if sys.byteorder != "little":
+                ind.byteswap()
+            accessors.append({"bufferView": add_view(ind.tobytes(), 34963), "componentType": 5125, "count": len(ind), "type": "SCALAR"})
+            prims.append({"attributes": attrs, "indices": len(accessors) - 1, "material": len(materials) - 1, "mode": 4})
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    gltf = {"asset": {"version": "2.0", "generator": generator + " obj2glb"},
+            "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0, "name": "model"}],
+            "meshes": [{"name": os.path.splitext(objs[-1])[0], "primitives": prims}],
+            "materials": materials, "accessors": accessors, "bufferViews": views,
+            "buffers": [{"byteLength": offset[0]}],
+            "extras": {"triangles": faces, "vertices": nverts}}
+    if images:
+        gltf["images"] = images
+        gltf["textures"] = textures
+        gltf["samplers"] = [{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}]
+    js = json.dumps(gltf, separators=(",", ":")).encode()
+    js += b" " * ((-len(js)) % 4)
+    total = 12 + 8 + len(js) + 8 + offset[0]
+    part = dest + ".part"
+    with open(part, "wb") as f:
+        f.write(struct.pack("<4sII", b"glTF", 2, total))
+        f.write(struct.pack("<I4s", len(js), b"JSON"))
+        f.write(js)
+        f.write(struct.pack("<I4s", offset[0], b"BIN\0"))
+        for p in bin_parts:
+            f.write(p)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(part, dest)
+    return {"triangles": faces, "vertices": nverts, "materials": len(materials), "textures": tex_info,
+            "bytes": total, "parseSeconds": round(parse_secs, 1), "seconds": round(time.time() - t0, 1),
+            "source": os.path.basename(obj_path), "bboxMeters": [round(maxs[i] - mins[i], 4) for i in range(3)]}
 
 
 class ApiError(Exception):
@@ -361,8 +618,8 @@ class Worker(threading.Thread):
                 "--status-file", status_path, "--title", job.get("title") or job["captureID"],
                 # Lets a build that was interrupted by a server restart resume instead of starting over.
                 "--checkpoint", os.path.join(jdir, "checkpoint")]
-        if job.get("obj"):
-            args.append("--obj")
+        if job.get("obj") or job.get("glb"):
+            args.append("--obj")  # model.glb is converted from the OBJ output
         if job["detail"] == "custom":
             args += ["--texture", job.get("texture") or "8k", "--max-polys", str(job.get("maxPolygons") or 1000000)]
         log.info("job %s: start %s", jid, " ".join(args[1:]))
@@ -391,6 +648,9 @@ class Worker(threading.Thread):
         if self.stopping:
             return  # server shutting down: leave 'processing' so the next start requeues it
         result = read_json(os.path.join(out, "result.json"), {}) or {}
+        glb_info, glb_error = None, None
+        if job.get("glb") and rc == 0 and result.get("ok"):
+            glb_info, glb_error = self.make_glb(job, out, status_path)
         files = []
         for name in FILE_NAMES:
             path = os.path.join(out, name)
@@ -409,6 +669,10 @@ class Worker(threading.Thread):
             j["polygons"] = result.get("polygons")
             j["textures"] = [{"name": t["name"], "width": t["width"], "height": t["height"]} for t in result.get("textures", [])]
             j["usdcheckerPassed"] = result.get("usdcheckerPassed")
+            if glb_info:
+                j["glbInfo"] = glb_info
+            if glb_error:
+                j["glbError"] = glb_error
             if rc == 0 and result.get("ok") and any(f["name"] == "model.usdz" for f in files):
                 j["state"] = "done"
                 j["progress"] = 1.0
@@ -440,6 +704,47 @@ class Worker(threading.Thread):
                     j2["notified"] = ok
                     self.store.save_job(j2)
                 except ApiError:
+                    pass
+
+    def make_glb(self, job, out, status_path):
+        """model.glb from out/obj (for Android). Never fails the job: returns (info, error)."""
+        jid = job["jobID"]
+        try:
+            atomic_write_json(status_path, {"state": "inspecting", "stage": "glb", "fraction": 1.0,
+                                            "message": "Packing the model for Android"})
+        except OSError:
+            pass
+        obj_dir = os.path.join(out, "obj")
+        try:
+            if not os.path.isdir(obj_dir):
+                raise ValueError("the build wrote no OBJ folder")
+            info = obj_to_glb(obj_dir, os.path.join(out, "model.glb"), max_texture=job.get("glbTextureSize"))
+            log.info("job %s: model.glb %d bytes, %d triangles, %d textures in %.1fs", jid, info["bytes"], info["triangles"],
+                     len(info["textures"]), info["seconds"])
+            try:
+                with open(os.path.join(out, "recon-log.txt"), "a") as f:
+                    f.write("model.glb: %s triangles, %s vertices, textures %s, %.1f MB, converted in %.1f s\n" % (
+                        "{:,}".format(info["triangles"]), "{:,}".format(info["vertices"]),
+                        ", ".join("%s %s" % (t["name"], t["mimeType"]) for t in info["textures"]) or "none",
+                        info["bytes"] / 1e6, info["seconds"]))
+            except OSError:
+                pass
+            return info, None
+        except Exception as e:  # a bad OBJ must never take the USDZ result down with it
+            log.exception("job %s: GLB conversion failed", jid)
+            try:
+                os.remove(os.path.join(out, "model.glb"))
+            except OSError:
+                pass
+            return None, {"code": "glb_failed", "message": "The model was built, but converting it for Android failed.",
+                          "technical": ("%s: %s" % (type(e).__name__, e))[:500]}
+        finally:
+            if not job.get("obj"):
+                # OBJ was only an intermediate for the GLB: don't keep (or list) it.
+                shutil.rmtree(obj_dir, ignore_errors=True)
+                try:
+                    os.remove(os.path.join(out, "model-obj.zip"))
+                except OSError:
                     pass
 
 
@@ -491,6 +796,7 @@ def assemble_upload(store, uid):
         t = time.time()
         job = {"jobID": jid, "uploadID": uid, "captureID": meta["captureID"], "title": meta.get("title"),
                "detail": meta["detail"], "texture": meta.get("texture"), "obj": meta.get("obj", False),
+               "glb": meta.get("glb", False), "glbTextureSize": meta.get("glbTextureSize"),
                "maxPolygons": meta.get("maxPolygons"), "notify": meta.get("notify", True),
                "inputBytes": size, "inputSha256": digest, "state": "queued", "progress": 0.0,
                "message": "Waiting for the Mac", "createdAt": now_iso(t), "files": [], "restarts": 0}
@@ -815,7 +1121,7 @@ class Handler(BaseHTTPRequestHandler):
             "chunkCount": meta["chunkCount"], "receivedChunks": got,
             "receivedBytes": sum(self.expected_chunk_size(meta, n) for n in got),
             "state": meta["state"], "jobID": meta.get("jobID"), "detail": meta["detail"],
-            "autoComplete": bool(meta.get("autoComplete")),
+            "autoComplete": bool(meta.get("autoComplete")), "obj": bool(meta.get("obj")), "glb": bool(meta.get("glb")),
             "createdAt": meta["createdAt"], "expiresAt": now_iso(meta["updatedAtEpoch"] + RETENTION_SECONDS),
         }
 
@@ -861,6 +1167,10 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "invalid_field", "texture must be 4k or 8k.", field="texture")
         obj = field("obj", bool, required=False)
         obj = bool(obj) if obj is not None else False
+        glb = bool(field("glb", bool, required=False))
+        glb_tex = field("glbTextureSize", int, required=False)
+        if glb_tex is not None and glb_tex not in GLB_TEXTURE_SIZES:
+            raise ApiError(400, "invalid_field", "glbTextureSize must be one of 1024, 2048, 4096, 8192.", field="glbTextureSize")
         max_polys = field("maxPolygons", int, required=False)
         if max_polys is not None and not (10000 <= max_polys <= 20000000):
             raise ApiError(400, "invalid_field", "maxPolygons must be between 10,000 and 20,000,000.", field="maxPolygons")
@@ -889,10 +1199,12 @@ class Handler(BaseHTTPRequestHandler):
             meta = {"uploadID": uid, "captureID": capture, "filename": filename, "totalBytes": total, "sha256": sha,
                     "chunkSize": chunk, "chunkCount": (total + chunk - 1) // chunk, "detail": detail,
                     "texture": texture, "obj": obj, "maxPolygons": max_polys, "title": title,
+                    "glb": glb, "glbTextureSize": glb_tex,
                     "notify": True if notify is None else notify, "state": "open", "autoComplete": auto_complete,
                     "createdAt": now_iso(t), "updatedAtEpoch": t}
             store.save_upload(meta)
-        log.info("upload %s created: capture=%s %d bytes, %d chunks, detail=%s", uid, capture, total, meta["chunkCount"], detail)
+        log.info("upload %s created: capture=%s %d bytes, %d chunks, detail=%s%s%s", uid, capture, total, meta["chunkCount"], detail,
+                 " obj" if obj else "", " glb" if glb else "")
         self.send_json(201, self.upload_view(meta))
 
     def get_upload(self, uid):
@@ -979,6 +1291,13 @@ class Handler(BaseHTTPRequestHandler):
         store = self.app.store
         v = {k: job.get(k) for k in ("jobID", "captureID", "title", "state", "detail", "message", "polygons", "createdAt",
                                      "startedAt", "finishedAt", "textures", "error", "restarts", "buildSeconds", "obj")}
+        v["glb"] = bool(job.get("glb"))
+        if job.get("glbInfo"):
+            gi = job["glbInfo"]
+            v["glbInfo"] = {"triangles": gi.get("triangles"), "vertices": gi.get("vertices"), "bytes": gi.get("bytes"),
+                            "textures": [{"name": t.get("name"), "mimeType": t.get("mimeType")} for t in gi.get("textures") or []]}
+        if job.get("glbError"):
+            v["glbError"] = {"code": job["glbError"].get("code"), "message": job["glbError"].get("message")}
         v["files"] = job.get("files") or []
         v["progress"] = job.get("progress", 0.0)
         v["stage"] = job.get("stage")

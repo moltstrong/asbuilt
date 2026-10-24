@@ -26,10 +26,15 @@ spec.loader.exec_module(rc)
 
 FAKE_CLI = r'''#!/bin/bash
 # fake asbuilt-recon: build <zip> --detail D --out OUT --status-file S ... ; sleeps $FAKE_SECONDS
-out=""; status=""
+out=""; status=""; obj=0; title=""
 echo "$@" > "$(dirname "$0")/last-args.txt"
-while [ $# -gt 0 ]; do case "$1" in --out) out="$2"; shift;; --status-file) status="$2"; shift;; esac; shift; done
+while [ $# -gt 0 ]; do case "$1" in --out) out="$2"; shift;; --status-file) status="$2"; shift;; --title) title="$2"; shift;; --obj) obj=1;; esac; shift; done
 mkdir -p "$out"
+if [ "$obj" = 1 ]; then
+  cp -R "$(dirname "$0")/obj-fixture" "$out/obj"
+  case "$title" in *broken-obj*) printf '# no faces\nv 0 0 0\n' > "$out/obj/baked_mesh_test.obj";; esac
+  (cd "$out" && zip -qr model-obj.zip obj)
+fi
 for i in 1 2 3 4 5 6 7 8 9 10; do
   echo "{\"state\":\"processing\",\"fraction\":0.$i,\"stage\":\"meshGeneration\",\"etaSeconds\":$((10-i)),\"message\":\"Building\"}" > "$status"
   sleep ${FAKE_SECONDS:-0.2}
@@ -104,6 +109,91 @@ def start(tmp, port, extra_env=None):
     raise RuntimeError("server didn't start")
 
 
+def tiny_png(w=4, h=4):
+    import struct
+    import zlib
+    raw = b"".join(b"\x00" + bytes([200, 100, 50]) * w for _ in range(h))
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + \
+        chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+
+# Apple-style OBJ set: v/vt/vn, one quad (fan-split into 2 triangles), one triangle with relative
+# (negative) indices, a material with diffuse + normal + AO maps.
+FIXTURE_OBJ = """mtllib baked_mesh_test.mtl
+v 0 0 0
+v 1 0 0
+v 1 1 0
+v 0 1 0
+v 0 0 1
+vt 0 0
+vt 1 0
+vt 1 1
+vt 0 1
+vt 0.5 0.5
+vn 0 0 1
+vn 0 1 0
+usemtl g0
+f 1/1/1 2/2/1 3/3/1 4/4/1
+f -5/-5/-1 -4/-4/-1 -1/-1/-2
+"""
+FIXTURE_MTL = """newmtl g0
+map_Kd baked_mesh_test_tex0.png
+norm baked_mesh_test_norm0.png
+map_ao baked_mesh_test_ao0.png
+"""
+
+
+def write_obj_fixture(d):
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "baked_mesh_test.obj"), "w") as f:
+        f.write(FIXTURE_OBJ)
+    with open(os.path.join(d, "baked_mesh_test.mtl"), "w") as f:
+        f.write(FIXTURE_MTL)
+    for m in ("tex0", "norm0", "ao0"):
+        with open(os.path.join(d, "baked_mesh_test_%s.png" % m), "wb") as f:
+            f.write(tiny_png())
+
+
+def parse_glb(data):
+    """-> (gltf JSON, BIN chunk) of a binary glTF, or raises."""
+    import struct
+    magic, version, total = struct.unpack_from("<4sII", data, 0)
+    assert magic == b"glTF" and version == 2 and total == len(data), (magic, version, total, len(data))
+    jlen, jtype = struct.unpack_from("<I4s", data, 12)
+    assert jtype == b"JSON" and jlen % 4 == 0
+    gltf = json.loads(data[20:20 + jlen])
+    blen, btype = struct.unpack_from("<I4s", data, 20 + jlen)
+    assert btype == b"BIN\0" and blen % 4 == 0
+    return gltf, data[28 + jlen:28 + jlen + blen]
+
+
+def check_glb_structure(name, data, want_tris):
+    import struct
+    try:
+        g, b = parse_glb(data)
+        prim = g["meshes"][0]["primitives"][0]
+        acc = g["accessors"]
+        tris = sum(acc[p["indices"]]["count"] for p in g["meshes"][0]["primitives"]) // 3
+        nv = acc[prim["attributes"]["POSITION"]]["count"]
+        ind_acc = acc[prim["indices"]]
+        bv = g["bufferViews"][ind_acc["bufferView"]]
+        idx = struct.unpack_from("<%dI" % ind_acc["count"], b, bv["byteOffset"])
+        mat = g["materials"][prim["material"]]
+        imgs = [g["images"][g["textures"][i]["source"]]["mimeType"] for i in (
+            mat["pbrMetallicRoughness"]["baseColorTexture"]["index"], mat["normalTexture"]["index"], mat["occlusionTexture"]["index"])]
+        ok = (tris == want_tris and max(idx) < nv and set(prim["attributes"]) == {"POSITION", "NORMAL", "TEXCOORD_0"}
+              and imgs == ["image/png"] * 3 and all(v["byteOffset"] + v["byteLength"] <= len(b) for v in g["bufferViews"])
+              and acc[0]["min"] == [0, 0, 0] and acc[0]["max"] == [1, 1, 1])
+        check(name, ok, (tris, nv, max(idx), prim["attributes"], imgs, acc[0].get("min"), acc[0].get("max")))
+        return g
+    except Exception as e:  # noqa: BLE001 - report any structural problem as a failed check
+        check(name, False, repr(e))
+        return None
+
+
 def wait_state(c, jid, states, timeout=60):
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -121,6 +211,17 @@ def main():
         with open(os.path.join(tmp, "fake-cli"), "w") as f:
             f.write(FAKE_CLI)
         os.chmod(os.path.join(tmp, "fake-cli"), 0o755)
+        write_obj_fixture(os.path.join(tmp, "obj-fixture"))
+
+        # obj_to_glb directly (stdlib converter): quad fan-split + negative indices + 3 maps.
+        spec2 = importlib.util.spec_from_file_location("recon_server", os.path.join(HERE, "recon_server.py"))
+        rs = importlib.util.module_from_spec(spec2)
+        spec2.loader.exec_module(rs)
+        gdest = os.path.join(tmp, "direct.glb")
+        info = rs.obj_to_glb(os.path.join(tmp, "obj-fixture"), gdest)
+        check("obj_to_glb stats", info["triangles"] == 3 and info["materials"] == 1 and len(info["textures"]) == 3, info)
+        with open(gdest, "rb") as fg:
+            check_glb_structure("obj_to_glb writes a valid GLB", fg.read(), 3)
         key = hashlib.sha256(os.urandom(32)).hexdigest()
         with open(os.path.join(tmp, "key"), "w") as f:
             f.write(key)
@@ -260,6 +361,63 @@ def main():
                 last = fa.read()
             check("phone preset = custom 250k + 8K diffuse/normal jpeg",
                   "--detail custom --texture 8k --max-polys 250000 --maps diffuse,normal --texture-format jpeg:0.9" in last, last)
+
+        # Backward compatibility: a job created without glb never gets --obj or model.glb.
+        with open(os.path.join(tmp, "last-args.txt")) as fa:
+            check("no glb/obj -> no --obj flag", "--obj" not in fa.read())
+        st, _, e = c.request("POST", "/v1/uploads", {"captureID": "cap-g", "filename": "Images.zip", "totalBytes": 10,
+                                                      "sha256": sha, "glb": "yes"})
+        check("400 glb wrong type", st == 400 and e["error"]["field"] == "glb", (st, e))
+        st, _, e = c.request("POST", "/v1/uploads", {"captureID": "cap-g", "filename": "Images.zip", "totalBytes": 10,
+                                                      "sha256": sha, "glb": True, "glbTextureSize": 3000})
+        check("400 bad glbTextureSize", st == 400 and e["error"]["field"] == "glbTextureSize", (st, e))
+
+        # Android: detail=phone + glb -> server builds with --obj, converts to model.glb, lists it with sha.
+        st, _, gu = c.request("POST", "/v1/uploads", {"captureID": "cap-android", "filename": "Images.zip",
+                                                       "totalBytes": os.path.getsize(z), "sha256": sha, "detail": "phone",
+                                                       "autoComplete": True, "glb": True, "chunkSize": 8 * 1024 * 1024})
+        check("201 glb upload", st == 201 and gu.get("glb") is True and gu["chunkCount"] == 9, gu)
+        rc.put_chunks(c, z, gu, log=quiet)
+        gj = None
+        for _ in range(100):
+            st, _, g = c.request("GET", "/v1/uploads/" + gu["uploadID"])
+            if g.get("jobID"):
+                gj = g["jobID"]
+                break
+            time.sleep(0.1)
+        j = wait_state(c, gj, ("done", "failed")) if gj else {}
+        names = [x["name"] for x in j.get("files", [])]
+        check("glb job done, model.glb listed, OBJ intermediate not listed",
+              j.get("state") == "done" and "model.glb" in names and "model.usdz" in names and "model-obj.zip" not in names
+              and j.get("glb") is True and (j.get("glbInfo") or {}).get("triangles") == 3, j)
+        with open(os.path.join(tmp, "last-args.txt")) as fa:
+            check("glb job built with --obj", "--obj" in fa.read())
+        gf = {x["name"]: x for x in j.get("files", [])}
+        if "model.glb" in gf:
+            st, hd, body = c.request("GET", gf["model.glb"]["url"], raw=True)
+            check("model.glb download: content type + sha", st == 200 and hd.get("Content-Type") == "model/gltf-binary"
+                  and hashlib.sha256(body).hexdigest() == gf["model.glb"]["sha256"] == hd.get("X-Content-SHA256"), (st, hd))
+            check_glb_structure("downloaded model.glb is a valid textured GLB", body, 3)
+            st, hd, body = c.request("GET", gf["model.glb"]["url"], headers={"Range": "bytes=12-"}, raw=True)
+            check("model.glb range resume", st == 206 and len(body) == gf["model.glb"]["bytes"] - 12, st)
+            jd = os.path.join(tmp, "data", "jobs", gj, "out")
+            check("OBJ intermediate removed from disk", not os.path.exists(os.path.join(jd, "obj")) and not os.path.exists(os.path.join(jd, "model-obj.zip")))
+
+        # glb + obj together keeps both; a broken OBJ never fails the build (USDZ still delivered).
+        st, _, bu = rc.create_upload(c, z, "cap-glb-broken", "phone", sha=sha, title="broken-obj", glb=True, obj=True, autoComplete=True)
+        rc.put_chunks(c, z, bu, log=quiet)
+        bj = None
+        for _ in range(100):
+            st, _, g = c.request("GET", "/v1/uploads/" + bu["uploadID"])
+            if g.get("jobID"):
+                bj = g["jobID"]
+                break
+            time.sleep(0.1)
+        j = wait_state(c, bj, ("done", "failed")) if bj else {}
+        names = [x["name"] for x in j.get("files", [])]
+        check("broken OBJ: job still done with usdz + obj zip, no glb, glbError set",
+              j.get("state") == "done" and "model.usdz" in names and "model-obj.zip" in names and "model.glb" not in names
+              and (j.get("glbError") or {}).get("code") == "glb_failed", j)
 
         # Restart mid-queue: two jobs, slow fake; kill server while job A processes; B queued.
         srv.send_signal(signal.SIGTERM)
