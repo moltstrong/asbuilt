@@ -15,6 +15,10 @@ photos.zip ─▶ pycolmap 4.2.1 (COLMAP + GLOMAP global mapper, CUDA SIFT)     
 Bake-off on the 41-photo stump (`bakeoff/RESULTS.md`): the **splat** beats Apple Object Capture on unseen photos
 (PSNR 22.6 vs 19.4 dB, SSIM 0.72 vs 0.61, LPIPS tie). The **splat-derived mesh does not beat Apple's mesh**
 (19.2 dB, worse geometry), so use this as an add-on photoreal splat, not a mesh replacement.
+A CPU-only **OpenMVS mesh** with CloudRecon's photo baker (`bakeoff/openmvs/`) roughly **ties** Apple's mesh: 19.8 dB,
+SSIM 0.65, LPIPS 0.255 against Apple raw's 19.45 / 0.62 / 0.268, with no visible difference in side-by-sides. It is not
+clearly better, so it is **not integrated** into the worker. It is, though, the way to get an Apple-class mesh without the Mac
+(est. $0.30–0.50 per scan on a 16-core CPU container). OpenMVS is AGPL-3.0.
 
 Status: **written and tested locally (CPU, GPU stages mocked); not deployed.** No Modal account was created and
 nothing was spent. See "Go live" below for what's needed.
