@@ -117,11 +117,11 @@ jobs:
           profile: pixel_6
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
-          script: bash Android/scripts/emulator-smoke.sh "$(ls apk/*.apk | head -1)" screenshots
+          script: bash Android/scripts/emulator-smoke.sh "$(ls apk/*.apk | head -1)" android-screenshots
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: emulator-screenshots
-          path: screenshots/
+          path: android-screenshots/
           retention-days: 30

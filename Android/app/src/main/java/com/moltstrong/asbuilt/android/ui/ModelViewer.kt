@@ -123,6 +123,7 @@ fun ModelViewer(source: ModelSource, modifier: Modifier = Modifier, onStatus: (S
                 childNodes.add(node)
                 loadedAsset = asset
                 state = null
+                Log.i("AsBuiltViewer", "model ready")
                 onStatus("loaded")
             }
         } catch (e: Throwable) {
