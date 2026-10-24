@@ -1,0 +1,212 @@
+{
+ "protocol": "Held-out metrics: Apple phone (250k) / Apple raw / Brush splat / splat->mesh vs the real held-out photos.\n\nAll renders come from the exact COLMAP camera of each held-out photo (undistorted PINHOLE 2000x1500):\n  * Apple meshes: SceneKit unlit texture render (eval/apple_*_constant), camera mapped into Apple's frame\n    via align.json (0.08 % / 0.02 deg residual), RGBA (alpha = mesh coverage)\n  * splat: Brush's own eval render at the same camera (splat/eval_15000), full frame\n  * splat->mesh (if present): SceneKit unlit render of mesh_final/model.usdz (cams via cams_out_frame.py)\nObject mask = Apple phone mesh coverage (the scanned object), eroded 4 px so 1-px silhouette jitter doesn't dominate.\nWithin the mask: PSNR, SSIM (mean of the SSIM map over the mask), LPIPS-alex on the mask bbox with\noutside-mask pixels composited from the photo (so only the object differs). Pixels a model doesn't cover inside\nthe mask are black (penalized) and reported as coverage.\nTwo variants: \"raw\" (renders as-is) and \"aligned\": one global sub-pixel 2D shift per (model, view), found by\nphase correlation over the object, is applied before scoring (test-time camera alignment, as in NeRF-W/BARF\nevaluations). Needed because COLMAP fixes the principal point at the image center while Apple refines it, so Apple's\nmesh rendered through COLMAP's held-out cameras lands a constant ~7 px off in every view (measured: -7.0..-7.4 px x,\n-0.5..-1.9 px y, no scale/rotation term) - a camera-convention offset, not a reconstruction error.",
+ "variant": "raw",
+ "heldout": [
+  "IMG_1024.jpg",
+  "IMG_1031.jpg",
+  "IMG_1038.jpg",
+  "IMG_1046.jpg",
+  "IMG_1053.jpg",
+  "IMG_1060.jpg"
+ ],
+ "perView": [
+  {
+   "view": "IMG_1024",
+   "maskFraction": 0.7497,
+   "apple_phone_250k": {
+    "psnr": 17.024,
+    "ssim": 0.1999,
+    "lpips": 0.2605,
+    "coverage": 1.0
+   },
+   "apple_raw": {
+    "psnr": 16.976,
+    "ssim": 0.1981,
+    "lpips": 0.2575,
+    "coverage": 1.0
+   },
+   "brush_splat": {
+    "psnr": 24.212,
+    "ssim": 0.7854,
+    "lpips": 0.2021,
+    "coverage": 1.0
+   },
+   "splat_mesh_250k": {
+    "psnr": 20.375,
+    "ssim": 0.5815,
+    "lpips": 0.2904,
+    "coverage": 0.9925
+   }
+  },
+  {
+   "view": "IMG_1031",
+   "maskFraction": 0.687,
+   "apple_phone_250k": {
+    "psnr": 16.332,
+    "ssim": 0.1613,
+    "lpips": 0.2223,
+    "coverage": 1.0
+   },
+   "apple_raw": {
+    "psnr": 16.278,
+    "ssim": 0.1598,
+    "lpips": 0.2204,
+    "coverage": 1.0
+   },
+   "brush_splat": {
+    "psnr": 23.337,
+    "ssim": 0.761,
+    "lpips": 0.2161,
+    "coverage": 1.0
+   },
+   "splat_mesh_250k": {
+    "psnr": 20.666,
+    "ssim": 0.5517,
+    "lpips": 0.2836,
+    "coverage": 0.9989
+   }
+  },
+  {
+   "view": "IMG_1038",
+   "maskFraction": 0.9224,
+   "apple_phone_250k": {
+    "psnr": 14.613,
+    "ssim": 0.2627,
+    "lpips": 0.3406,
+    "coverage": 1.0
+   },
+   "apple_raw": {
+    "psnr": 14.637,
+    "ssim": 0.2616,
+    "lpips": 0.3391,
+    "coverage": 1.0
+   },
+   "brush_splat": {
+    "psnr": 25.773,
+    "ssim": 0.801,
+    "lpips": 0.2459,
+    "coverage": 1.0
+   },
+   "splat_mesh_250k": {
+    "psnr": 17.092,
+    "ssim": 0.588,
+    "lpips": 0.3684,
+    "coverage": 0.9998
+   }
+  },
+  {
+   "view": "IMG_1046",
+   "maskFraction": 0.8085,
+   "apple_phone_250k": {
+    "psnr": 15.116,
+    "ssim": 0.188,
+    "lpips": 0.3642,
+    "coverage": 1.0
+   },
+   "apple_raw": {
+    "psnr": 15.11,
+    "ssim": 0.1861,
+    "lpips": 0.3568,
+    "coverage": 1.0
+   },
+   "brush_splat": {
+    "psnr": 18.418,
+    "ssim": 0.5521,
+    "lpips": 0.3948,
+    "coverage": 1.0
+   },
+   "splat_mesh_250k": {
+    "psnr": 16.981,
+    "ssim": 0.408,
+    "lpips": 0.446,
+    "coverage": 0.9981
+   }
+  },
+  {
+   "view": "IMG_1053",
+   "maskFraction": 0.9901,
+   "apple_phone_250k": {
+    "psnr": 16.735,
+    "ssim": 0.2147,
+    "lpips": 0.299,
+    "coverage": 1.0
+   },
+   "apple_raw": {
+    "psnr": 16.731,
+    "ssim": 0.2138,
+    "lpips": 0.2934,
+    "coverage": 1.0
+   },
+   "brush_splat": {
+    "psnr": 21.656,
+    "ssim": 0.6926,
+    "lpips": 0.2959,
+    "coverage": 1.0
+   },
+   "splat_mesh_250k": {
+    "psnr": 20.202,
+    "ssim": 0.5022,
+    "lpips": 0.4284,
+    "coverage": 0.9991
+   }
+  },
+  {
+   "view": "IMG_1060",
+   "maskFraction": 0.637,
+   "apple_phone_250k": {
+    "psnr": 16.568,
+    "ssim": 0.1819,
+    "lpips": 0.2404,
+    "coverage": 1.0
+   },
+   "apple_raw": {
+    "psnr": 16.501,
+    "ssim": 0.1804,
+    "lpips": 0.2366,
+    "coverage": 1.0
+   },
+   "brush_splat": {
+    "psnr": 21.766,
+    "ssim": 0.7039,
+    "lpips": 0.2187,
+    "coverage": 1.0
+   },
+   "splat_mesh_250k": {
+    "psnr": 19.935,
+    "ssim": 0.5203,
+    "lpips": 0.2742,
+    "coverage": 0.9979
+   }
+  }
+ ],
+ "mean": {
+  "apple_phone_250k": {
+   "psnr": 16.0647,
+   "ssim": 0.2014,
+   "lpips": 0.2878,
+   "coverage": 1.0,
+   "views": 6
+  },
+  "apple_raw": {
+   "psnr": 16.0388,
+   "ssim": 0.2,
+   "lpips": 0.284,
+   "coverage": 1.0,
+   "views": 6
+  },
+  "brush_splat": {
+   "psnr": 22.527,
+   "ssim": 0.716,
+   "lpips": 0.2623,
+   "coverage": 1.0,
+   "views": 6
+  },
+  "splat_mesh_250k": {
+   "psnr": 19.2085,
+   "ssim": 0.5253,
+   "lpips": 0.3485,
+   "coverage": 0.9977,
+   "views": 6
+  }
+ }
+}
