@@ -120,7 +120,9 @@ struct ReconChunkUploaderTests {
                                             file: file, key: ReconChunkUploader.key(uploadID: "up_t", index: 2))
         #expect(retry.status == 200)
         #expect(server.count("/v1/uploads/up_t/chunks/2") == 300_002)
-        #expect(progress.maxSent(for: "up_t#4") >= 300_004)
+        // Byte-level didSendBodyData callbacks are timing-dependent (a small body can go out in one
+        // write with none); the end-of-transfer signal (-1) is deterministic and clears the bar.
+        for i in 0..<5 { #expect(progress.sawFinish(for: "up_t#\(i)")) }
         #expect(await uploader.runningKeys().isEmpty)
     }
 
@@ -157,9 +159,11 @@ struct ReconChunkUploaderTests {
 final class ProgressBox: @unchecked Sendable {
     private let lock = NSLock()
     private var sent: [String: Int64] = [:]
+    private var finished: Set<String> = []
     func note(_ key: String, _ value: Int64) {
         lock.lock(); defer { lock.unlock() }
-        sent[key] = max(sent[key] ?? 0, value)
+        if value < 0 { finished.insert(key) } else { sent[key] = max(sent[key] ?? 0, value) }
     }
+    func sawFinish(for key: String) -> Bool { lock.lock(); defer { lock.unlock() }; return finished.contains(key) }
     func maxSent(for key: String) -> Int64 { lock.lock(); defer { lock.unlock() }; return sent[key] ?? 0 }
 }
