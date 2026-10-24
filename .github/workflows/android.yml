@@ -1,0 +1,132 @@
+name: Android CI
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "Android/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "Android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Unit tests + signed release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: Android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests (protocol, chunk uploader, STORE zip, capture coach; MockWebServer)
+        run: ./gradlew --no-daemon :core:test --console=plain
+
+      - name: Release signing + server config from secrets
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          RECON_API_KEY: ${{ secrets.RECON_API_KEY }}
+          RECON_BASE_URL: ${{ secrets.RECON_BASE_URL }}
+          RECON_DISCOVERY_URL: ${{ secrets.RECON_DISCOVERY_URL }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_B64" ]; then
+            echo "::error::ANDROID_KEYSTORE_B64 secret missing; can't sign the release APK."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          if [ -z "$RECON_API_KEY" ] || { [ -z "$RECON_BASE_URL" ] && [ -z "$RECON_DISCOVERY_URL" ]; }; then
+            echo "::warning title=Mac builds off::RECON_* secrets not set; the APK needs a server pasted in Settings."
+          fi
+          echo "Mac builds configured: key ${#RECON_API_KEY} chars, base URL set: $([ -n "$RECON_BASE_URL" ] && echo yes || echo no), discovery set: $([ -n "$RECON_DISCOVERY_URL" ] && echo yes || echo no)"
+
+      - name: Assemble release APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_VERSION_CODE: ${{ github.run_number }}
+          RECON_API_KEY: ${{ secrets.RECON_API_KEY }}
+          RECON_BASE_URL: ${{ secrets.RECON_BASE_URL }}
+          RECON_DISCOVERY_URL: ${{ secrets.RECON_DISCOVERY_URL }}
+        run: ./gradlew --no-daemon :app:assembleRelease --console=plain
+
+      - name: Verify signature
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/apksigner" verify --verbose --print-certs "$APK" | grep -E "Verified using|Signer #1 certificate DN|Number of signers"
+          "$BT/aapt2" dump badging "$APK" | grep -E "^package:|sdkVersion|targetSdkVersion|native-code"
+          mkdir -p "$RUNNER_TEMP/out"
+          VC=$("$BT/aapt2" dump badging "$APK" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p")
+          cp "$APK" "$RUNNER_TEMP/out/AsBuilt-android-$VC.apk"
+          sha256sum "$RUNNER_TEMP/out/"*.apk
+          rm -f "$RUNNER_TEMP/release.jks"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asbuilt-android-apk
+          path: ${{ runner.temp }}/out/*.apk
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-reports
+          path: Android/core/build/reports/tests/
+          retention-days: 14
+
+  emulator:
+    name: Emulator smoke screenshots (API 34)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: asbuilt-android-apk
+          path: apk
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run emulator + smoke script
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
+          script: bash Android/scripts/emulator-smoke.sh "$(ls apk/*.apk | head -1)" screenshots
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator-screenshots
+          path: screenshots/
+          retention-days: 30

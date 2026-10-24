@@ -3,6 +3,7 @@ name: iOS CI
 on:
   push:
     branches: ["**"]
+    paths-ignore: ['Android/**', 'CloudRecon/**', '.github/workflows/android.yml']
   pull_request:
   workflow_dispatch:
 

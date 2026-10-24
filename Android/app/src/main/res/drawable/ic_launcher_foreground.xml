@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Isometric cube: AsBuilt mark -->
+    <path android:fillColor="#FFFFFF" android:pathData="M54,30 L75,42 L54,54 L33,42 Z" />
+    <path android:fillColor="#D6E8FF" android:pathData="M33,42 L54,54 L54,78 L33,66 Z" />
+    <path android:fillColor="#9CC7FF" android:pathData="M75,42 L75,66 L54,78 L54,54 Z" />
+</vector>
