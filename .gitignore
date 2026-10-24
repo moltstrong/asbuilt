@@ -7,3 +7,6 @@ DerivedData/
 xcuserdata/
 AsBuiltCore/.build/
 artifacts/
+
+# Kotlin source package named "build" (not an output dir)
+!/Android/app/src/main/java/com/moltstrong/asbuilt/android/build/
