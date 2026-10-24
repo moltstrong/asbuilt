@@ -138,6 +138,17 @@ def main():
 
         st, _, h = c.request("GET", "/v1/health", auth=False)
         check("health no auth", st == 200 and h["ok"] is True)
+        st, _, d = c.request("POST", "/v1/diagnostics", {"captureID": "CAP-1", "event": "chunk_failed", "errorCode": -1005,
+                                                          "errorDomain": "NSURLErrorDomain", "chunk": 3, "message": "x" * 900})
+        check("diagnostics accepted", st == 200 and d.get("ok") is True, (st, d))
+        st, _, d = c.request("POST", "/v1/diagnostics", {"captureID": "CAP-1"})
+        check("diagnostics needs event", st == 400 and d["error"]["code"] == "invalid_field", (st, d))
+        st, _, d = c.request("POST", "/v1/diagnostics", {"event": "x"}, auth=False)
+        check("diagnostics needs auth", st == 401, st)
+        diag = os.path.join(tmp, "logs", "phone-diagnostics.jsonl")
+        line = open(diag).read().strip().splitlines()[-1] if os.path.exists(diag) else "{}"
+        rec = json.loads(line)
+        check("diagnostics written + message capped", rec.get("errorCode") == -1005 and len(rec.get("message", "")) == 500, line[:120])
         st, hd, e = c.request("GET", "/v1/jobs", auth=False)
         check("401 without key", st == 401 and e["error"]["code"] == "unauthorized" and "WWW-Authenticate" in hd)
         st, _, e = c.request("GET", "/v1/jobs", auth="0" * 64)

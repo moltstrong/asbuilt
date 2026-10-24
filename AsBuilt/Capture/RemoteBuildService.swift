@@ -19,13 +19,24 @@ final class RemoteBuildService: ObservableObject {
     let config: ReconConfig?
     var isConfigured: Bool { config != nil }
 
+    /// Bytes on the wire for chunks not yet acknowledged, per capture (drives the live progress bar).
+    @Published private(set) var inFlightBytes: [UUID: Int64] = [:]
+
     private weak var store: JobStore?
     private var runs: [UUID: Task<Void, Never>] = [:]
     private var resolvedBase: URL?
     private let session: URLSession
-    private static let chunkSize = 16 * 1024 * 1024
+    /// Chunk PUTs run on a background URLSession: the system keeps sending while AsBuilt is
+    /// suspended (screen locked, user switched apps), and transfers survive the app being killed.
+    private let uploader: ReconChunkUploader
+    private var chunkProgress: [UUID: [Int: Int64]] = [:]
+    private var lastProgressPublish: [UUID: Date] = [:]
+    private static let chunkSize = ReconChunker.cellularChunkSize
+    static let backgroundSessionID = "com.moltstrong.asbuilt.recon.upload"
+    /// Set by the app delegate when iOS relaunches AsBuilt to deliver background upload events.
+    var backgroundEventsCompletion: (() -> Void)?
 
-    init(info: [String: Any] = Bundle.main.infoDictionary ?? [:]) {
+    init(info: [String: Any] = Bundle.main.infoDictionary ?? [:], background: Bool = true) {
         config = ReconConfig(info: info)
         let c = URLSessionConfiguration.default
         c.timeoutIntervalForRequest = 90
@@ -33,7 +44,56 @@ final class RemoteBuildService: ObservableObject {
         c.httpMaximumConnectionsPerHost = 4
         c.requestCachePolicy = .reloadIgnoringLocalCacheData
         c.urlCache = nil
+        c.waitsForConnectivity = false
         session = URLSession(configuration: c)
+
+        let u: URLSessionConfiguration
+        #if os(iOS) && !targetEnvironment(simulator)
+        if background && config != nil {
+            u = URLSessionConfiguration.background(withIdentifier: Self.backgroundSessionID)
+            u.isDiscretionary = false
+            u.sessionSendsLaunchEvents = true
+        } else {
+            u = URLSessionConfiguration.default
+        }
+        #else
+        u = URLSessionConfiguration.default
+        #endif
+        // Idle timeout per transfer; queued chunks wait behind the 3 connections, so keep it generous.
+        u.timeoutIntervalForRequest = 300
+        u.timeoutIntervalForResource = 24 * 60 * 60
+        u.allowsCellularAccess = true
+        u.allowsExpensiveNetworkAccess = true
+        u.allowsConstrainedNetworkAccess = true
+        u.httpMaximumConnectionsPerHost = 3
+        u.requestCachePolicy = .reloadIgnoringLocalCacheData
+        u.urlCache = nil
+        uploader = ReconChunkUploader(configuration: u)
+        uploader.onProgress = { [weak self] key, sent in
+            Task { @MainActor in self?.noteProgress(key: key, sent: sent) }
+        }
+        uploader.onBackgroundEventsFinished = { [weak self] in
+            Task { @MainActor in
+                self?.backgroundEventsCompletion?()
+                self?.backgroundEventsCompletion = nil
+            }
+        }
+    }
+
+    /// uploadID → capture, for routing byte progress from the background session.
+    private var uploadOwners: [String: UUID] = [:]
+
+    private func noteProgress(key: String, sent: Int64) {
+        guard let parsed = ReconChunkUploader.parse(key: key), let captureID = uploadOwners[parsed.uploadID] else { return }
+        var map = chunkProgress[captureID] ?? [:]
+        if sent < 0 { map[parsed.index] = nil } else { map[parsed.index] = sent }
+        chunkProgress[captureID] = map
+        // Publish at most ~5x a second (every published change re-renders the card).
+        let now = Date()
+        if sent < 0 || now.timeIntervalSince(lastProgressPublish[captureID] ?? .distantPast) > 0.2 {
+            lastProgressPublish[captureID] = now
+            inFlightBytes[captureID] = map.values.reduce(0, +)
+        }
     }
 
     func attach(_ store: JobStore) {
@@ -71,6 +131,7 @@ final class RemoteBuildService: ObservableObject {
         guard var build = store?.capture(job: jobID, capture: captureID)?.remoteBuild else { return }
         let uploadID = build.jobID == nil ? build.uploadID : nil
         let remoteJob = build.phase == .done ? nil : build.jobID
+        if let id = build.uploadID { uploader.cancelAll(uploadID: id) }
         build.phase = .cancelled
         build.message = "Cancelled. The photos are still on this iPhone."
         build.finishedAt = Date()
@@ -167,6 +228,8 @@ final class RemoteBuildService: ObservableObject {
                 }
                 b.message = Self.waitingMessage(error)
                 persist(b, job: jobID, capture: captureID)
+                diagnose(captureID, uploadID: b.uploadID, event: "waiting", build: b, message: "\(type(of: error)): \(b.message ?? "")",
+                         error: (error as? URLError).map { $0 as NSError })
                 try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
                 delay = min(60, delay * 2)
             }
@@ -223,50 +286,97 @@ final class RemoteBuildService: ObservableObject {
         build.message = nil
         persist(build, job: jobID, capture: captureID)
 
-        // Up to 3 chunks in flight.
+        // Every remaining chunk goes to the background session at once (it sends 3 at a time), so iOS
+        // keeps uploading while AsBuilt is suspended; each chunk retries on its own, so a dropped
+        // cellular connection costs one 8 MB chunk, not the whole upload.
         guard let uploadID = build.uploadID else { throw Offline() }
+        uploadOwners[uploadID] = captureID
+        defer {
+            chunkProgress[captureID] = nil
+            inFlightBytes[captureID] = nil
+        }
         var pending = p.chunks.filter { !Set(build.receivedChunks).contains($0.index) }
         var completedJob: String?
-        try await withThrowingTaskGroup(of: (ReconChunk, Data, Int).self) { group in
-            let s = session
+        var consecutiveFailures = 0
+        let up = uploader
+        diagnose(captureID, uploadID: uploadID, event: "upload_start", build: build,
+                 message: "\(pending.count) of \(p.chunks.count) chunks to send, \(ReconFormat.bytes(p.totalBytes))")
+        try await withThrowingTaskGroup(of: (ReconChunk, Result<ReconChunkUploader.Response, Error>).self) { group in
             func launch(_ chunk: ReconChunk) {
                 let file = work.appendingPathComponent(chunk.fileName)
                 let req = ReconRequests.chunk(base: base, key: key, uploadID: uploadID, index: chunk.index,
                                               byteCount: chunk.bytes, sha256: chunk.sha256)
+                let k = ReconChunkUploader.key(uploadID: uploadID, index: chunk.index)
                 group.addTask {
-                    let (data, resp) = try await s.upload(for: req, fromFile: file)
-                    return (chunk, data, (resp as? HTTPURLResponse)?.statusCode ?? 0)
+                    do { return (chunk, .success(try await up.send(req, file: file, key: k))) }
+                    catch { return (chunk, .failure(error)) }
                 }
             }
-            for _ in 0..<min(3, pending.count) { launch(pending.removeFirst()) }
-            while let result = try await group.next() {
-                let (chunk, data, code) = result
-                if code == 200, let receipt = try? JSONDecoder().decode(ReconChunkReceipt.self, from: data) {
-                    build.markChunkReceived(receipt)
-                    try? FileManager.default.removeItem(at: work.appendingPathComponent(chunk.fileName))
-                    if var latest = current(jobID, captureID), latest.isActive {
-                        latest.receivedChunks = build.receivedChunks
-                        latest.phase = build.phase == .queued ? .queued : .uploading
-                        latest.chunks = build.chunks
-                        latest.totalBytes = build.totalBytes
-                        latest.message = nil
-                        persist(latest, job: jobID, capture: captureID)
-                    } else {
-                        throw CancellationError()
+            while !pending.isEmpty { launch(pending.removeFirst()) }
+            while let (chunk, result) = try await group.next() {
+                try Task.checkCancellation()
+                switch result {
+                case .failure(let error):
+                    if error is CancellationError || (error as? URLError)?.code == .cancelled { throw CancellationError() }
+                    consecutiveFailures += 1
+                    let ns = error as NSError
+                    diagnose(captureID, uploadID: uploadID, event: "chunk_error", build: build, message: ns.localizedDescription,
+                             error: ns, chunk: chunk.index)
+                    // A few failures in a row means the network or tunnel is down: back off in run().
+                    if consecutiveFailures >= 6 {
+                        group.cancelAll()
+                        throw Offline(message: (error as? URLError)?.code == .notConnectedToInternet
+                                      ? "This iPhone is offline. AsBuilt keeps trying."
+                                      : "The connection to your Mac keeps dropping. AsBuilt keeps trying.")
                     }
-                } else if code == 409, let e = ReconAPIError.parse(data), e.code == "upload_completed" {
-                    completedJob = e.jobID
-                    group.cancelAll()
-                    break
-                } else if code == 400, let e = ReconAPIError.parse(data), e.code == "chunk_sha256_mismatch" {
-                    pending.append(chunk)   // re-send (transport corruption)
-                } else {
-                    try fail(data, code)
-                    throw Offline()
+                    try await Task.sleep(nanoseconds: UInt64(min(16, 1 << consecutiveFailures)) * 1_000_000_000)
+                    launch(chunk)
+                    continue
+                case .success(let response):
+                    let (data, code) = (response.body, response.status)
+                    if code == 200, let receipt = try? JSONDecoder().decode(ReconChunkReceipt.self, from: data) {
+                        consecutiveFailures = 0
+                        build.markChunkReceived(receipt)
+                        try? FileManager.default.removeItem(at: work.appendingPathComponent(chunk.fileName))
+                        if var latest = current(jobID, captureID), latest.isActive {
+                            latest.receivedChunks = build.receivedChunks
+                            latest.phase = build.phase == .queued ? .queued : .uploading
+                            latest.chunks = build.chunks
+                            latest.totalBytes = build.totalBytes
+                            latest.chunkSize = build.chunkSize
+                            latest.chunkCount = build.chunkCount
+                            latest.failureCount = 0
+                            latest.message = nil
+                            persist(latest, job: jobID, capture: captureID)
+                        } else {
+                            throw CancellationError()
+                        }
+                    } else if code == 409, let e = ReconAPIError.parse(data), e.code == "upload_completed" {
+                        completedJob = e.jobID
+                        group.cancelAll()
+                        break
+                    } else if code == 400, let e = ReconAPIError.parse(data), e.code == "chunk_sha256_mismatch" {
+                        diagnose(captureID, uploadID: uploadID, event: "chunk_sha_mismatch", build: build, chunk: chunk.index)
+                        pending.append(chunk)   // re-send (transport corruption)
+                    } else if code == 404 || code == 401 || code == 413 {
+                        try fail(data, code)
+                        throw Offline()
+                    } else {
+                        // Cloudflare error page, 5xx, 429: retry this chunk after a pause.
+                        consecutiveFailures += 1
+                        diagnose(captureID, uploadID: uploadID, event: "chunk_http_\(code)", build: build,
+                                 message: String(decoding: data.prefix(200), as: UTF8.self), chunk: chunk.index)
+                        if consecutiveFailures >= 4 { group.cancelAll(); try fail(data, code); throw Offline() }
+                        try await Task.sleep(nanoseconds: UInt64(min(16, 1 << consecutiveFailures)) * 1_000_000_000)
+                        launch(chunk)
+                        continue
+                    }
                 }
+                if completedJob != nil { break }
                 if !pending.isEmpty { launch(pending.removeFirst()) }
             }
         }
+        diagnose(captureID, uploadID: uploadID, event: "upload_chunks_done", build: build)
         if let completedJob {
             build.jobID = completedJob
             build.phase = .queued
@@ -425,6 +535,39 @@ final class RemoteBuildService: ObservableObject {
             throw Fatal(message: "Couldn't pack the photos: \(error.localizedDescription)")
         }
     }
+
+    // MARK: - Diagnostics
+
+    /// Best-effort report to the Mac's log (never blocks, never throws, never includes the key).
+    private func diagnose(_ captureID: UUID, uploadID: String?, event: String, build: RemoteBuild?, message: String? = nil,
+                          error: NSError? = nil, chunk: Int? = nil) {
+        guard let config, let base = resolvedBase ?? config.baseURL else { return }
+        var state = "unknown"
+        #if canImport(UIKit)
+        switch UIApplication.shared.applicationState {
+        case .active: state = "active"
+        case .inactive: state = "inactive"
+        case .background: state = "background"
+        @unknown default: state = "unknown"
+        }
+        #endif
+        let body = ReconDiagnostic(captureID: captureID.uuidString, uploadID: uploadID, event: event, phase: build?.phase.rawValue,
+                                   message: message, errorDomain: error?.domain, errorCode: error?.code, chunk: chunk,
+                                   chunkSize: build?.chunkSize, received: build?.receivedChunks.count, chunkCount: build?.chunkCount,
+                                   appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+                                   device: Self.deviceModel, appState: state)
+        guard let request = try? ReconRequests.diagnostics(base: base, key: config.apiKey, body: body) else { return }
+        let s = session
+        Task.detached(priority: .utility) { _ = try? await s.data(for: request) }
+    }
+
+    private static let deviceModel: String = {
+        var info = utsname()
+        uname(&info)
+        return withUnsafeBytes(of: &info.machine) { raw in
+            String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+        }
+    }()
 
     // MARK: - Networking helpers
 

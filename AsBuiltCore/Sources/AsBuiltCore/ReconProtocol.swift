@@ -262,10 +262,56 @@ public enum ReconRequests {
 
     /// Download of `files[].url` (relative to the base URL). Returns nil for anything that isn't a
     /// `/v1/jobs/<id>/files/<name>` path, so a hostile server can't redirect the key elsewhere.
+    /// What went wrong on the phone (upload errors, phase changes), so the Mac's log shows both sides.
+    public static func diagnostics(base: URL, key: String, body: ReconDiagnostic) throws -> URLRequest {
+        var r = request("POST", url(base, "/v1/diagnostics"), key: key, timeout: 20)
+        r.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        r.httpBody = try JSONEncoder().encode(body)
+        return r
+    }
+
     public static func file(base: URL, key: String, relativeURL: String) -> URLRequest? {
         guard relativeURL.hasPrefix("/v1/jobs/"), relativeURL.contains("/files/"), !relativeURL.contains(".."),
               !relativeURL.contains("://") else { return nil }
         return request("GET", url(base, relativeURL), key: key, timeout: 600)
+    }
+}
+
+/// One phone-side event for `POST /v1/diagnostics` (logged on the Mac, never shown to anyone else).
+public struct ReconDiagnostic: Codable, Equatable, Sendable {
+    public var captureID: String
+    public var uploadID: String?
+    public var event: String
+    public var phase: String?
+    public var message: String?
+    public var errorDomain: String?
+    public var errorCode: Int?
+    public var chunk: Int?
+    public var chunkSize: Int?
+    public var received: Int?
+    public var chunkCount: Int?
+    public var appBuild: String?
+    public var device: String?
+    public var appState: String?
+
+    public init(captureID: String, uploadID: String? = nil, event: String, phase: String? = nil, message: String? = nil,
+                errorDomain: String? = nil, errorCode: Int? = nil, chunk: Int? = nil, chunkSize: Int? = nil,
+                received: Int? = nil, chunkCount: Int? = nil, appBuild: String? = nil, device: String? = nil,
+                appState: String? = nil) {
+        self.captureID = captureID
+        self.uploadID = uploadID
+        self.event = String(event.prefix(64))
+        self.phase = phase
+        self.message = message.map { String($0.prefix(500)) }
+        self.errorDomain = errorDomain
+        self.errorCode = errorCode
+        self.chunk = chunk
+        self.chunkSize = chunkSize
+        self.received = received
+        self.chunkCount = chunkCount
+        self.appBuild = appBuild
+        self.device = device
+        self.appState = appState
     }
 }
 
@@ -314,6 +360,7 @@ public struct ReconChunkPlan: Codable, Equatable, Sendable {
 
 public enum ReconChunker {
     public static let defaultChunkSize = 32 * 1024 * 1024
+    /// What the phone uses: small enough that a dropped cellular connection loses seconds, not minutes.
     public static let cellularChunkSize = 8 * 1024 * 1024
 
     public static func chunkCount(totalBytes: Int64, chunkSize: Int) -> Int {
@@ -522,9 +569,12 @@ public struct RemoteBuild: Codable, Hashable, Sendable {
         return bytes
     }
 
-    public var uploadFraction: Double {
+    public var uploadFraction: Double { uploadFraction(inFlightBytes: 0) }
+
+    /// Upload progress counting bytes of chunks still on the wire, so the bar moves smoothly.
+    public func uploadFraction(inFlightBytes: Int64) -> Double {
         guard let total = totalBytes, total > 0 else { return 0 }
-        return min(1, Double(uploadedBytes) / Double(total))
+        return min(1, Double(uploadedBytes + max(0, inFlightBytes)) / Double(total))
     }
 
     public var missingChunks: [Int] {
@@ -535,10 +585,12 @@ public struct RemoteBuild: Codable, Hashable, Sendable {
 
     /// One bar across the whole trip: prepare 0-5 %, upload 5-40 %, queue 40 %, build 40-95 %,
     /// download 95-100 %.
-    public var overallFraction: Double {
+    public var overallFraction: Double { overallFraction(inFlightBytes: 0) }
+
+    public func overallFraction(inFlightBytes: Int64) -> Double {
         switch phase {
         case .preparing: return 0.05 * clamp(phaseProgress)
-        case .uploading, .waitingForMac: return 0.05 + 0.35 * uploadFraction
+        case .uploading, .waitingForMac: return 0.05 + 0.35 * uploadFraction(inFlightBytes: inFlightBytes)
         case .queued: return 0.40
         case .building: return 0.40 + 0.55 * clamp(phaseProgress)
         case .downloading: return 0.95 + 0.05 * clamp(phaseProgress)
@@ -574,13 +626,15 @@ public struct RemoteBuild: Codable, Hashable, Sendable {
     }
 
     /// Second line: sizes, stage, time left.
-    public var detailLine: String {
+    public var detailLine: String { detailLine(inFlightBytes: 0) }
+
+    public func detailLine(inFlightBytes: Int64) -> String {
         switch phase {
         case .preparing:
             return photoCount.map { "\($0) photos" } ?? "Getting photos ready"
         case .uploading:
             guard let total = totalBytes else { return "Starting upload" }
-            return "\(ReconFormat.bytes(uploadedBytes)) of \(ReconFormat.bytes(total))"
+            return "\(ReconFormat.bytes(min(total, uploadedBytes + max(0, inFlightBytes)))) of \(ReconFormat.bytes(total))"
         case .waitingForMac:
             return message ?? "Your Mac isn't reachable right now. AsBuilt keeps trying."
         case .queued:

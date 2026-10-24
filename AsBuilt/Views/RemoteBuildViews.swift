@@ -7,6 +7,8 @@ import AsBuiltCore
 struct RemoteBuildCardView: View {
     let build: RemoteBuild?
     var photoCount: Int?
+    /// Bytes of chunks still on the wire (smooth upload bar between 8 MB acknowledgements).
+    var inFlightBytes: Int64 = 0
     var onStart: () -> Void = {}
     var onCancel: () -> Void = {}
     var onRetry: () -> Void = {}
@@ -62,7 +64,7 @@ struct RemoteBuildCardView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
             if let build, build.isActive {
-                Text("\(Int((build.overallFraction * 100).rounded()))%")
+                Text("\(Int((build.overallFraction(inFlightBytes: inFlightBytes) * 100).rounded()))%")
                     .font(.subheadline.monospacedDigit().weight(.semibold))
                     .foregroundStyle(.secondary)
             }
@@ -71,7 +73,7 @@ struct RemoteBuildCardView: View {
 
     @ViewBuilder
     private func active(_ build: RemoteBuild) -> some View {
-        ProgressView(value: max(0.02, build.overallFraction))
+        ProgressView(value: max(0.02, build.overallFraction(inFlightBytes: inFlightBytes)))
             .tint(build.phase == .waitingForMac ? Theme.warn : Theme.accent)
         HStack(spacing: 6) {
             ForEach(Array(Self.steps.enumerated()), id: \.offset) { index, name in
@@ -87,12 +89,12 @@ struct RemoteBuildCardView: View {
                 if index < Self.steps.count - 1 { Spacer(minLength: 2) }
             }
         }
-        Text(build.phase == .waitingForMac ? (build.message ?? build.detailLine) : build.detailLine)
+        Text(build.phase == .waitingForMac ? (build.message ?? build.detailLine) : build.detailLine(inFlightBytes: inFlightBytes))
             .font(.subheadline).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("remoteBuildDetail")
         if build.phase == .preparing || build.phase == .uploading || build.phase == .waitingForMac {
-            Text("Keep AsBuilt open until the photos are sent. After that you can lock the phone; your Mac texts you when the model is ready.")
+            Text("Sending keeps going if you lock the phone or switch apps; Wi-Fi is fastest. Your Mac texts you when the model is ready.")
                 .font(.footnote).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -128,11 +130,12 @@ struct RemoteBuildCardView: View {
 struct RemoteBuildCard: View {
     let jobID: UUID
     let capture: Capture
+    @ObservedObject private var service = RemoteBuildService.shared
 
     var body: some View {
-        let service = RemoteBuildService.shared
         if capture.kind == .object, capture.origin != .sample, service.isConfigured || capture.remoteBuild != nil {
             RemoteBuildCardView(build: capture.remoteBuild, photoCount: capture.imageCount,
+                                inFlightBytes: service.inFlightBytes[capture.id] ?? 0,
                                 onStart: { service.start(job: jobID, capture: capture.id) },
                                 onCancel: { service.cancel(job: jobID, capture: capture.id) },
                                 onRetry: { service.start(job: jobID, capture: capture.id, restart: true) })

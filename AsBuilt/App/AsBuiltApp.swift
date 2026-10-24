@@ -1,8 +1,25 @@
 import SwiftUI
+import UIKit
 import AsBuiltCore
+
+/// Receives background URLSession wake-ups (Mac build chunk uploads finishing while AsBuilt was
+/// suspended or killed) and hands iOS's completion handler to the upload service.
+final class AsBuiltAppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        guard identifier == RemoteBuildService.backgroundSessionID else {
+            completionHandler()
+            return
+        }
+        Task { @MainActor in
+            RemoteBuildService.shared.backgroundEventsCompletion = completionHandler
+        }
+    }
+}
 
 @main
 struct AsBuiltApp: App {
+    @UIApplicationDelegateAdaptor(AsBuiltAppDelegate.self) private var appDelegate
     @StateObject private var store: JobStore
     @StateObject private var router: Router
 

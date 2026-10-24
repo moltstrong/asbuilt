@@ -153,6 +153,43 @@ struct ReconProtocolTests {
         #expect(ReconAPIError.parse(Data("<html>530</html>".utf8)) == nil)
     }
 
+    @Test func inFlightBytesMoveTheBarSmoothly() {
+        var b = RemoteBuild(phase: .uploading)
+        b.totalBytes = 100 << 20
+        b.chunkSize = 8 << 20
+        b.chunkCount = 13
+        b.receivedChunks = [0, 1]
+        #expect(abs(b.uploadFraction - 0.16) < 1e-9)
+        #expect(abs(b.uploadFraction(inFlightBytes: 4 << 20) - 0.20) < 1e-9)
+        #expect(b.uploadFraction(inFlightBytes: 500 << 20) == 1)
+        #expect(b.overallFraction(inFlightBytes: 4 << 20) > b.overallFraction)
+        #expect(b.detailLine(inFlightBytes: 4 << 20) == "21.0 MB of 105 MB")
+        #expect(b.detailLine == "16.8 MB of 105 MB")
+    }
+
+    @Test func uploaderKeysRoundTrip() {
+        let key = ReconChunkUploader.key(uploadID: "up_1f47#x", index: 12)
+        #expect(ReconChunkUploader.parse(key: key)?.uploadID == "up_1f47#x")
+        #expect(ReconChunkUploader.parse(key: key)?.index == 12)
+        #expect(ReconChunkUploader.parse(key: "nohash") == nil)
+        #expect(ReconChunkUploader.parse(key: "#3") == nil)
+        #expect(ReconChunkUploader.parse(key: "up_1#-1") == nil)
+    }
+
+    @Test func diagnosticsRequestCarriesNoSecretsInTheURL() throws {
+        let base = URL(string: "https://h.trycloudflare.com")!
+        let key = String(repeating: "d", count: 64)
+        let body = ReconDiagnostic(captureID: "CAP", uploadID: "up_1", event: "chunk_failed", phase: "uploading",
+                                   message: String(repeating: "x", count: 900), errorDomain: NSURLErrorDomain, errorCode: -1005, chunk: 3)
+        let r = try ReconRequests.diagnostics(base: base, key: key, body: body)
+        #expect(r.url?.absoluteString == "https://h.trycloudflare.com/v1/diagnostics")
+        #expect(r.httpMethod == "POST")
+        #expect(!(r.url?.absoluteString.contains(key) ?? true))
+        let json = try JSONSerialization.jsonObject(with: r.httpBody ?? Data()) as? [String: Any]
+        #expect(json?["errorCode"] as? Int == -1005)
+        #expect((json?["message"] as? String)?.count == 500)
+    }
+
     @Test func formatting() {
         #expect(ReconFormat.bytes(34_521_789) == "34.5 MB")
         #expect(ReconFormat.bytes(1_260_000_000) == "1.3 GB")

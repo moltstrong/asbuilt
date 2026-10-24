@@ -750,6 +750,7 @@ class Handler(BaseHTTPRequestHandler):
         ("GET", re.compile(r"^/v1/jobs/([^/]+)$"), "get_job", True),
         ("DELETE", re.compile(r"^/v1/jobs/([^/]+)$"), "delete_job", True),
         ("GET", re.compile(r"^/v1/jobs/([^/]+)/files/([^/]+)$"), "get_file", True),
+        ("POST", re.compile(r"^/v1/diagnostics$"), "diagnostics", True),
     ]
 
     def dispatch(self):
@@ -1012,6 +1013,28 @@ class Handler(BaseHTTPRequestHandler):
             v["files"] = [f for f in v["files"] if f["name"] == "recon-log.txt"]
         return v
 
+    DIAG_FIELDS = {"captureID": str, "uploadID": str, "event": str, "phase": str, "message": str, "errorDomain": str,
+                   "errorCode": int, "chunk": int, "chunkSize": int, "received": int, "chunkCount": int,
+                   "appBuild": str, "device": str, "appState": str}
+
+    def diagnostics(self):
+        """Phone-side events (upload errors, phase changes) so the Mac's log shows both ends."""
+        b = self.read_json_body(limit=16 * 1024)
+        rec = {"at": now_iso(), "ip": self.client_ip()}
+        for k, typ in self.DIAG_FIELDS.items():
+            v = b.get(k)
+            if isinstance(v, typ) and not isinstance(v, bool):
+                rec[k] = v[:500] if isinstance(v, str) else v
+        if not rec.get("event"):
+            raise ApiError(400, "invalid_field", "event is required.", field="event")
+        log.info("phone: %s", json.dumps(rec, sort_keys=True))
+        try:
+            with open(os.path.join(self.app.log_dir, "phone-diagnostics.jsonl"), "a") as f:
+                f.write(json.dumps(rec, sort_keys=True) + "\n")
+        except OSError:
+            pass
+        self.send_json(200, {"ok": True})
+
     def list_jobs(self):
         cap = (self.query.get("captureID") or [None])[0]
         store = self.app.store
@@ -1176,6 +1199,7 @@ def main():
     setup_logging(a.log_dir, a.verbose)
     app = App()
     app.started_at = now_iso()
+    app.log_dir = a.log_dir
     app.api_key = load_api_key(a.key_file)
     cfg = read_json(a.config, {}) or {}
     app.store = Store(a.data)
