@@ -433,8 +433,9 @@ fun CaptureReview(result: CaptureResult, onBuild: () -> Unit, onSave: () -> Unit
         Spacer(Modifier.height(16.dp))
         Text("${result.photos} photos", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))
+        val fixLine = r.fix?.let { if (r.grade == CoachReport.Grade.A) "Tip: $it" else it }
         Text(
-            r.fix ?: "Great coverage. Ready for a full-detail build.", style = MaterialTheme.typography.bodyLarge,
+            fixLine ?: "Great coverage. Ready for a full-detail build.", style = MaterialTheme.typography.bodyLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(20.dp))

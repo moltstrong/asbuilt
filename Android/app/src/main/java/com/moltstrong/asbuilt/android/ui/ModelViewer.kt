@@ -65,7 +65,7 @@ fun ModelViewer(source: ModelSource, modifier: Modifier = Modifier, onStatus: (S
     val environmentLoader = rememberEnvironmentLoader(engine)
     val environment = rememberEnvironment(environmentLoader, isOpaque = true)
     val childNodes = rememberNodes()
-    val cameraNode = rememberCameraNode(engine) { position = Position(0f, 0.15f, 1.6f) }
+    val cameraNode = rememberCameraNode(engine) { position = Position(0f, 0.2f, 2.9f) }
     val mainLight = rememberMainLightNode(engine) { intensity = 70_000f }
     var state by remember(source) { mutableStateOf<String?>("Loading model…") }
     var error by remember(source) { mutableStateOf<String?>(null) }
@@ -146,7 +146,7 @@ fun ModelViewer(source: ModelSource, modifier: Modifier = Modifier, onStatus: (S
                 mainLightNode = mainLight,
                 childNodes = childNodes,
                 cameraManipulator = rememberCameraManipulator(
-                    orbitHomePosition = Position(0f, 0.15f, 1.6f),
+                    orbitHomePosition = Position(0f, 0.2f, 2.9f),
                     targetPosition = Position(0f, 0f, 0f),
                 ),
                 onFrame = { onFrame() },

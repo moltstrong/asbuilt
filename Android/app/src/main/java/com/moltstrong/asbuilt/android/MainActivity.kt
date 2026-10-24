@@ -99,7 +99,7 @@ class MainActivity : ComponentActivity() {
                 "progress" -> screen = Screen.DemoProgress
                 "intro" -> screen = Screen.Capture("demo-intro", demoSupport = ArSupport.SUPPORTED)
                 "unsupported" -> screen = Screen.Capture("demo-unsupported", demoSupport = ArSupport.UNSUPPORTED)
-                "model" -> screen = Screen.Model("Sample: Monstera tree", "20k triangles · 1K textures · built on a Mac", ModelSource.Asset(SAMPLE_ASSET))
+                "model" -> screen = Screen.Model("Sample: Monster tree", "20k triangles · 1K textures · built on a Mac", ModelSource.Asset(SAMPLE_ASSET))
                 "settings" -> screen = Screen.Settings
                 "review" -> screen = Screen.DemoCoach(CoachDemo.Scenario.GRADE)
                 else -> CoachDemo.Scenario.entries.firstOrNull { it.key == demo }?.let { screen = Screen.DemoCoach(it) }

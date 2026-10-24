@@ -28,7 +28,10 @@ private val scheme = darkColorScheme(
     error = AsBuiltColors.Problem,
 )
 
+/** Root Surface sets LocalContentColor = onBackground, so plain Text on non-Scaffold screens is readable. */
 @Composable
 fun AsBuiltTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = scheme, content = content)
+    MaterialTheme(colorScheme = scheme) {
+        androidx.compose.material3.Surface(color = scheme.background, contentColor = scheme.onBackground, content = content)
+    }
 }
