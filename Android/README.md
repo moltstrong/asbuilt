@@ -36,7 +36,7 @@ and shows the full-detail textured model it gets back (`model.glb`) in a Filamen
 CI (`.github/workflows/android.yml`) runs on every push that touches `Android/**`:
 - `:core:test`.
 - `:app:assembleRelease`, signed from `ANDROID_KEYSTORE_B64` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS`.
-- Server config is injected as BuildConfig fields from `RECON_API_KEY` / `RECON_BASE_URL` / `RECON_DISCOVERY_URL`.
+- Server config is injected as BuildConfig fields. The public CI build embeds only `RECON_DISCOVERY_URL`; paste the API key once in Settings (stored encrypted). Local builds may also set `RECON_API_KEY` / `RECON_BASE_URL` for a fully preconfigured private APK.
 - An API 34 emulator job opens every screen through `--es demo <name>` and uploads screenshots
   (`scripts/emulator-smoke.sh`).
 

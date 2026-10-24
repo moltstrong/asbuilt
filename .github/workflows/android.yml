@@ -43,8 +43,6 @@ jobs:
       - name: Release signing + server config from secrets
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
-          RECON_API_KEY: ${{ secrets.RECON_API_KEY }}
-          RECON_BASE_URL: ${{ secrets.RECON_BASE_URL }}
           RECON_DISCOVERY_URL: ${{ secrets.RECON_DISCOVERY_URL }}
         run: |
           if [ -z "$ANDROID_KEYSTORE_B64" ]; then
@@ -53,10 +51,9 @@ jobs:
           fi
           echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
           echo "ANDROID_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
-          if [ -z "$RECON_API_KEY" ] || { [ -z "$RECON_BASE_URL" ] && [ -z "$RECON_DISCOVERY_URL" ]; }; then
-            echo "::warning title=Mac builds off::RECON_* secrets not set; the APK needs a server pasted in Settings."
-          fi
-          echo "Mac builds configured: key ${#RECON_API_KEY} chars, base URL set: $([ -n "$RECON_BASE_URL" ] && echo yes || echo no), discovery set: $([ -n "$RECON_DISCOVERY_URL" ] && echo yes || echo no)"
+          # Public repo: the CI APK is a public artifact, so it never contains the server API key or
+          # tunnel URL. Only the discovery URL is built in; paste the key once in Settings.
+          echo "Discovery URL built in: $([ -n "$RECON_DISCOVERY_URL" ] && echo yes || echo no); API key: not embedded (public build)"
 
       - name: Assemble release APK
         env:
@@ -64,8 +61,6 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_VERSION_CODE: ${{ github.run_number }}
-          RECON_API_KEY: ${{ secrets.RECON_API_KEY }}
-          RECON_BASE_URL: ${{ secrets.RECON_BASE_URL }}
           RECON_DISCOVERY_URL: ${{ secrets.RECON_DISCOVERY_URL }}
         run: ./gradlew --no-daemon :app:assembleRelease --console=plain
 

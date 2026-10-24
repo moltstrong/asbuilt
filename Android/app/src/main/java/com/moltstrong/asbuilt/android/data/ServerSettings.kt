@@ -9,8 +9,8 @@ import com.moltstrong.asbuilt.android.BuildConfig
 import com.moltstrong.asbuilt.core.recon.ReconConfig
 
 /**
- * Server config: the release build is preconfigured from CI secrets (BuildConfig); Settings can paste
- * an override (URL / key / discovery URL), stored with EncryptedSharedPreferences (Keystore-backed).
+ * Server config: BuildConfig holds whatever the build was given (the public CI build has only the discovery
+ * URL, never the API key); Settings pastes the key / URLs, stored with EncryptedSharedPreferences.
  * Values are never logged.
  */
 class ServerSettings(context: Context) {
@@ -66,7 +66,8 @@ class ServerSettings(context: Context) {
     /** Effective config: override fields win individually; otherwise the built-in CI values. */
     fun config(): ReconConfig {
         val key = overrideApiKey.ifBlank { BuildConfig.RECON_API_KEY }
-        val base = overrideBaseUrl.ifBlank { if (overrideApiKey.isNotBlank() && overrideDiscoveryUrl.isBlank()) "" else BuildConfig.RECON_BASE_URL }
+        // A key-only override (public CI build) keeps the built-in base / discovery URLs.
+        val base = overrideBaseUrl.ifBlank { if (overrideDiscoveryUrl.isNotBlank()) "" else BuildConfig.RECON_BASE_URL }
         val disc = overrideDiscoveryUrl.ifBlank { if (overrideBaseUrl.isNotBlank()) "" else BuildConfig.RECON_DISCOVERY_URL }
         return ReconConfig(base.ifBlank { null }, disc.ifBlank { null }, key)
     }

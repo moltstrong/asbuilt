@@ -10,7 +10,7 @@ that does exactly what the app should do: `scripts/recon-client.py e2e`.
 | | |
 |---|---|
 | Base URL | `https://<random>.trycloudflare.com` (Cloudflare quick tunnel → `127.0.0.1:8765`). **It changes whenever the tunnel restarts** (Mac reboot, network change, cloudflared crash). |
-| Discovery | `GET https://api.github.com/gists/41f628ce6ff0601ad6e3ac2e78cc83cb` (secret gist; no auth needed). Read `files["asbuilt-recon.json"].content` and parse it as JSON: `{"baseURL": "...", "apiVersion": 1, "transport": "cloudflare-quick-tunnel", "updatedAt": "..."}`. The Mac rewrites it on every new URL. |
+| Discovery | `GET https://api.github.com/gists/<discovery-gist-id>` (secret gist; no auth needed). Read `files["asbuilt-recon.json"].content` and parse it as JSON: `{"baseURL": "...", "apiVersion": 1, "transport": "cloudflare-quick-tunnel", "updatedAt": "..."}`. The Mac rewrites it on every new URL. |
 | Build-time injection | `RECON_API_KEY` (64 hex chars), `RECON_BASE_URL`, `RECON_DISCOVERY_URL` (= the gist API URL above) are GitHub Actions secrets. CI writes them into Info.plist keys `ReconAPIKey`, `ReconBaseURL`, `ReconDiscoveryURL` at build time. **Never commit them.** Store the key in the Keychain on first launch. |
 
 Base URL resolution in the app:
