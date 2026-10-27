@@ -265,13 +265,19 @@ struct JobDetailView: View {
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .minimumScaleFactor(0.8)
-                Text(enabled ? subtitle : "Needs LiDAR")
+                Text(subtitle)
                     .font(.caption.weight(.semibold))
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .minimumScaleFactor(0.8)
                     .fixedSize(horizontal: false, vertical: true)
                     .opacity(0.9)
+                if !enabled {
+                    Text("Needs LiDAR")
+                        .font(.caption2.weight(.heavy))
+                        .padding(.horizontal, 8).padding(.vertical, 2)
+                        .background(Capsule().stroke(Color.secondary.opacity(0.6), lineWidth: 1))
+                }
             }
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, minHeight: height)

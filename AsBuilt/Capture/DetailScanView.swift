@@ -312,6 +312,7 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
                 framesSinceIntegration = 0
                 fusionBusy = true
                 let g = generation
+                let tableTop = (planeY ?? -.greatestFiniteMagnitude) + 0.004
                 fusionQueue.async { [weak self] in
                     guard let self else { return }
                     let rgb = color?.rgb()
@@ -320,8 +321,11 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
                                                 cameraToWorld: pose, color: rgb)
                     self.volume.integrate(depthFrame, bounds: bounds)
                     let stats = self.volume.stats
-                    // Tint samples every ~12 fused frames (cheap: one pass over block headers).
-                    let samples = stats.framesIntegrated % 12 == 1 ? self.volume.surfaceSamples(maxCount: 1500) : nil
+                    // Tint samples every ~12 fused frames (cheap: one pass over block headers). Only the
+                    // object is painted: the table inside the box is fused too but removed at the end.
+                    let samples = stats.framesIntegrated % 12 == 1
+                        ? self.volume.surfaceSamples(maxCount: 1500).filter { $0.position.y > tableTop }
+                        : nil
                     DispatchQueue.main.async {
                         self.fusionBusy = false
                         guard g == self.generation else { return }

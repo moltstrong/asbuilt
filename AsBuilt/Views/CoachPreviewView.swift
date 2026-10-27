@@ -168,15 +168,19 @@ enum CoachPreviewRenderer {
     }
 
     static func render(viewSize: CGSize, scenario: CoachDemo.Scenario) -> Output {
-        let distance: Float = scenario == .tooFar ? 1.35 : 0.5
-        let pose = CoachDemo.orbitPose(azimuth: 18, elevation: 30, distance: distance)
+        // Arm's length from the valve (the coach's own metrics come from `CoachDemo`).
+        let distance: Float = scenario == .tooFar ? 1.35 : 0.36
+        let pose = CoachDemo.orbitPose(azimuth: 18, elevation: 32, distance: distance)
         let (image, K) = cameraImage(viewSize: viewSize, pose: pose)
-        let box = DemoDetailScan.fitBox()?.box
+        let fit = DemoDetailScan.fitBox()
+        let box = fit?.box
+        let tableTop = (fit?.planeY ?? -.greatestFiniteMagnitude) + 0.004
         // Real partial fusion: the first views of the orbit -> thin (red) and solid (green) areas.
         let volume = DemoDetailScan.partialVolume(frames: scenario == .grade ? 18 : 8)
         var tint: [CoachPreviewTint] = []
         let worldToCamera = pose.inverse
-        for s in volume.surfaceSamples(solidWeight: 6, maxCount: 2500) {
+        // Paint only the object: the table inside the box is fused too, but removed at the end.
+        for s in volume.surfaceSamples(solidWeight: 6, maxCount: 2500) where s.position.y > tableTop {
             let pc4 = worldToCamera * SIMD4(s.position, 1)
             guard let uv = K.project(SIMD3(pc4.x, pc4.y, pc4.z)) else { continue }
             let u = CGFloat(uv.x) / CGFloat(K.width), v = CGFloat(uv.y) / CGFloat(K.height)
@@ -253,7 +257,10 @@ struct ObjectPlacePreviewView: View {
     @State private var output: CoachOutput?
     @State private var viewSize: CGSize = .zero
 
-    private let pose = DemoDetailScan.placementPose
+    /// Where the preview "camera" stands: arm's length, looking down at the valve (the box itself is
+    /// fitted from `DemoDetailScan.placementPose`, like the demo scan).
+    private let pose = AnalyticScene.orbitPoses(target: DemoDetailScan.target, distance: 0.36, count: 1,
+                                                elevationsDegrees: [35], azimuthRangeDegrees: 25...25)[0]
     private var units: UnitSystem { UnitSystem(rawValue: unitsRaw) ?? .imperial }
 
     var body: some View {
@@ -325,7 +332,7 @@ struct ObjectPlacePreviewView: View {
             var coach = CaptureCoach(mode: .detail)
             var last: CoachOutput?
             for k in 0..<40 {
-                var frame = CoachFrame(timestamp: Double(k) / 30, cameraToWorld: pose, ambientIntensity: 900, centerDepth: 0.5,
+                var frame = CoachFrame(timestamp: Double(k) / 30, cameraToWorld: pose, ambientIntensity: 900, centerDepth: 0.36,
                                        highConfidenceFraction: 0.8, tracking: .normal, featureCount: 300)
                 if let box = fit?.box { frame = ObjectScan.coachFrame(frame, box: box) }
                 last = coach.update(frame)

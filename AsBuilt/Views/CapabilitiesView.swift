@@ -117,9 +117,9 @@ struct ResolutionGuide: View {
     static let modes: [Mode] = [
         Mode(name: "Room (RoomPlan)", icon: "square.split.bottomrightquarter", resolves: "about 1-2 cm",
              detail: "Walls, doors, windows, openings and major fixtures as clean shapes. Not small details."),
-        Mode(name: "Detail scan (object)", icon: "cube.transparent.fill", resolves: "about 2-5 mm at arm's length",
+        Mode(name: "Detail scan (object)", icon: "cube.transparent.fill", resolves: "about 2-5 mm",
              detail: "Boxes the object on the table and fuses LiDAR depth inside the box (2 mm voxels up to 30 cm, 3 mm up to 60 cm, else 4 mm). The LiDAR sensor sets the limit: edges round off by a few mm and fine texture, threads or labels do not show. Model in seconds, no upload."),
-        Mode(name: "Capture object (photos)", icon: "camera.aperture", resolves: "finest: full detail in the cloud",
+        Mode(name: "Capture object (photos)", icon: "camera.aperture", resolves: "finest detail",
              detail: "Photos rebuilt in the cloud at full detail (250k triangles, 8K photo texture), sized with LiDAR. The best surface detail; takes about 20 minutes."),
         Mode(name: "Room mesh", icon: "point.3.filled.connected.trianglepath.dotted", resolves: "a few cm",
              detail: "ARKit's live mesh: triangles of a few cm. Fast for whole spaces."),

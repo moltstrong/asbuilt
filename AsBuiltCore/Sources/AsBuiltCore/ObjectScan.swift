@@ -208,7 +208,8 @@ public struct ScenePoint: Sendable, Hashable {
 /// 3. **Component**: 3D flood fill on a coarse grid from the cell nearest the aim point, so clutter
 ///    beside the object (a mug, a tape) is left out.
 /// 4. **Box**: yaw from the minimum-area rectangle of the footprint, extents from robust percentiles,
-///    bottom on the plane, plus a little room on the side the camera cannot see.
+///    bottom on the plane. The side the camera cannot see is mirrored about the object's top (valves,
+///    pumps and boxes are roughly symmetric about their highest part), never by more than 60 %.
 ///
 /// No plane (object held in the hand, irregular surface): the box goes around the depth blob at the
 /// aim point instead.
@@ -227,8 +228,8 @@ public enum ObjectBoxFitter {
         /// Flood-fill grid cell (m) when the point spacing is unknown; otherwise 3 point spacings
         /// (clamped to 12-30 mm), so thin parts (a valve stem under its lever) stay connected.
         public var cellSize: Float = 0.015
-        /// Fraction of the visible size added on the side facing away from the camera.
-        public var hiddenSideAllowance: Float = 0.25
+        /// Largest growth of the hidden side, as a fraction of the visible size along that axis.
+        public var maxHiddenExtension: Float = 0.6
         public var minSide: Float = 0.02
         public var maxSide: Float = 1.2
 
@@ -435,8 +436,9 @@ public enum ObjectBoxFitter {
         }
         guard component.count >= 12 else { return nil }
 
-        // Yaw: minimum-area rectangle of the footprint, long side on X.
-        let yaw = Float(MeshNormalizer.alignmentYaw(component.map { Point2D(Double($0.x), Double($0.z)) }, quantum: 0.001))
+        // Yaw: an elongated footprint (valve, pipe, beam) follows its principal axis, which a
+        // half-visible footprint barely tilts; otherwise the minimum-area rectangle, long side on X.
+        let yaw = footprintYaw(component)
         let c = cos(yaw), s = sin(yaw)
         let xs = component.map { c * $0.x + s * $0.z }.sorted()
         let zs = component.map { -s * $0.x + c * $0.z }.sorted()
@@ -446,14 +448,32 @@ public enum ObjectBoxFitter {
         var z0 = pct(zs, 0.005), z1 = pct(zs, 0.995)
         let y1 = pct(ys, 0.995)
         let y0 = planeY ?? pct(ys, 0.005)
-        // Room on the far side: the camera only sees the front of the object.
+        // The far side: the camera only sees the front. Mirror the near side about the top of the
+        // object (mean footprint position of its highest 3 % of points) along each axis the camera
+        // looks down, capped at `maxHiddenExtension` of the visible size.
         let camX = c * cameraPosition.x + s * cameraPosition.z - (x0 + x1) / 2
         let camZ = -s * cameraPosition.x + c * cameraPosition.z - (z0 + z1) / 2
         let horiz = max(1e-6, (camX * camX + camZ * camZ).squareRoot())
-        let extraX = settings.hiddenSideAllowance * (x1 - x0) * abs(camX) / horiz
-        let extraZ = settings.hiddenSideAllowance * (z1 - z0) * abs(camZ) / horiz
-        if camX > 0 { x0 -= extraX } else { x1 += extraX }
-        if camZ > 0 { z0 -= extraZ } else { z1 += extraZ }
+        let yTop = pct(ys, 0.97)
+        var ridgeX: Float = 0, ridgeZ: Float = 0, ridgeN: Float = 0
+        for p in component where p.y >= yTop {
+            ridgeX += c * p.x + s * p.z
+            ridgeZ += -s * p.x + c * p.z
+            ridgeN += 1
+        }
+        if ridgeN > 0 {
+            ridgeX /= ridgeN
+            ridgeZ /= ridgeN
+            let cap = settings.maxHiddenExtension
+            if abs(camX) / horiz > 0.3 {
+                let span = x1 - x0
+                if camX > 0 { x0 = max(x0 - cap * span, min(x0, 2 * ridgeX - x1)) } else { x1 = min(x1 + cap * span, max(x1, 2 * ridgeX - x0)) }
+            }
+            if abs(camZ) / horiz > 0.3 {
+                let span = z1 - z0
+                if camZ > 0 { z0 = max(z0 - cap * span, min(z0, 2 * ridgeZ - z1)) } else { z1 = min(z1 + cap * span, max(z1, 2 * ridgeZ - z0)) }
+            }
+        }
         let lo = settings.minSide / 2, hi = settings.maxSide / 2
         let half = SIMD3<Float>(min(hi, max(lo, (x1 - x0) / 2)), min(hi, max(lo, (y1 - y0) / 2)), min(hi, max(lo, (z1 - z0) / 2)))
         let cl = SIMD2<Float>((x0 + x1) / 2, (z0 + z1) / 2)
@@ -461,6 +481,35 @@ public enum ObjectBoxFitter {
         let center = SIMD3<Float>(c * cl.x - s * cl.y, y0 + half.y, s * cl.x + c * cl.y)
         return Result(box: ObjectBox(center: center, halfExtents: half, yaw: yaw), planeY: planeY,
                       objectPoints: component.count, aimPoint: aim)
+    }
+
+    /// Footprint direction of `points` (yaw about +Y that puts the long side on X).
+    static func footprintYaw(_ points: [SIMD3<Float>]) -> Float {
+        let n = Float(points.count)
+        guard n >= 3 else { return 0 }
+        var mx: Float = 0, mz: Float = 0
+        for p in points { mx += p.x; mz += p.z }
+        mx /= n
+        mz /= n
+        var sxx: Float = 0, szz: Float = 0, sxz: Float = 0
+        for p in points {
+            let dx = p.x - mx, dz = p.z - mz
+            sxx += dx * dx
+            szz += dz * dz
+            sxz += dx * dz
+        }
+        // Eigenvalues of the 2x2 covariance.
+        let tr = sxx + szz, det = sxx * szz - sxz * sxz
+        let disc = max(0, tr * tr / 4 - det).squareRoot()
+        let l1 = tr / 2 + disc, l2 = max(1e-12, tr / 2 - disc)
+        if l1 / l2 > 3.2 { // std-dev ratio above ~1.8
+            // Major axis angle in (x, z); `local x = cos(yaw) x + sin(yaw) z` puts it on X.
+            var yaw = 0.5 * atan2(2 * sxz, sxx - szz)
+            while yaw > .pi / 2 { yaw -= .pi }
+            while yaw <= -.pi / 2 { yaw += .pi }
+            return yaw
+        }
+        return Float(MeshNormalizer.alignmentYaw(points.map { Point2D(Double($0.x), Double($0.z)) }, quantum: 0.001))
     }
 
     /// Points of the 26-connected grid component that contains (or is nearest to, within `maxReach`)
