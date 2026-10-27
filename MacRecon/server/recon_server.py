@@ -75,6 +75,17 @@ GLB_TEXTURE_SIZES = (1024, 2048, 4096, 8192)
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
+# User-facing wording that names the machine doing the builds. CloudRecon/cloud_server.py swaps in cloud
+# wording; look these up at use time (MESSAGES[...]) so that swap reaches every message the server emits.
+MESSAGES = {
+    "queued": "Waiting for the Mac",
+    "queued_in_line": "Waiting for the Mac (%d in line)",
+    "starting": "Starting the build",
+    "waiting_other_build": "Waiting for another build on the Mac to finish",
+    "internal_error": "The Mac hit an internal error while building. Try again.",
+    "insufficient_storage": "The Mac doesn't have enough free disk space for this capture right now. Try again later.",
+}
+
 log = logging.getLogger("asbuilt-recon")
 
 
@@ -522,14 +533,22 @@ class Notifier:
 # Worker
 
 class Worker(threading.Thread):
-    def __init__(self, store, cli, notifier):
+    """Runs queued jobs oldest first in `concurrency` build slots (threads). The Mac uses 1: Object Capture
+    builds one model at a time anyway. The cloud server runs several (each slot drives its own container)."""
+
+    def __init__(self, store, cli, notifier, concurrency=1):
         super().__init__(name="worker", daemon=True)
         self.store = store
         self.cli = cli
         self.notifier = notifier
-        self.current = None  # (jobID, Popen)
+        self.concurrency = max(1, int(concurrency))
+        self.running = {}  # jobID -> build handle (Popen here); guarded by store.lock
         self.cancel_requested = set()
         self.stopping = False
+
+    def is_running(self, jid):
+        with self.store.lock:
+            return jid in self.running
 
     def requeue_interrupted(self):
         """On start: anything left 'processing' by a crash/restart goes back to the queue head."""
@@ -565,13 +584,25 @@ class Worker(threading.Thread):
     def cancel(self, jid):
         with self.store.lock:
             self.cancel_requested.add(jid)
-            if self.current and self.current[0] == jid:
+            p = self.running.get(jid)
+            if p is not None:
                 try:
-                    self.current[1].send_signal(signal.SIGTERM)
+                    p.send_signal(signal.SIGTERM)
                 except Exception:
                     pass
 
+    def next_job(self, queued):
+        """Which queued job a free slot takes (oldest first)."""
+        return queued[0]
+
     def run(self):
+        for i in range(1, self.concurrency):
+            threading.Thread(target=self.slot_loop, name="worker-%d" % (i + 1), daemon=True).start()
+        self.slot_loop()
+
+    def slot_loop(self):
+        """One build slot: claim the next queued job under the store lock (so two slots never take the same
+        job), build it, repeat. `concurrency` slots => at most that many builds at once."""
         while not self.stopping:
             with self.store.lock:
                 try:
@@ -583,23 +614,31 @@ class Worker(threading.Thread):
                 if not queued:
                     self.store.wake.wait(timeout=30)
                     continue
-                job = queued[0]
+                job = self.next_job(queued)
                 job["state"] = "processing"
                 job["startedAt"] = now_iso()
-                job["message"] = "Starting the build"
-                self.store.save_job(job)
+                job["message"] = MESSAGES["starting"]
+                try:
+                    self.store.save_job(job)
+                except OSError:  # never let a slot thread die on a transient disk error
+                    log.exception("worker: can't start %s", job["jobID"])
+                    self.store.wake.wait(timeout=5)
+                    continue
             try:
                 self.build(job)
             except Exception:
                 log.exception("worker crashed on %s", job["jobID"])
                 with self.store.lock:
+                    self.running.pop(job["jobID"], None)
                     try:
                         j = self.store.load_job(job["jobID"])
-                        j.update(state="failed", finishedAt=now_iso(), message="The Mac hit an internal error while building. Try again.",
+                        j.update(state="failed", finishedAt=now_iso(), message=MESSAGES["internal_error"],
                                  error={"code": "internal_error", "message": "internal server error"})
                         self.store.save_job(j)
                     except ApiError:
                         pass
+                    except Exception:
+                        log.exception("worker: couldn't mark %s failed", job["jobID"])
 
     def build(self, job):
         jid = job["jobID"]
@@ -630,7 +669,7 @@ class Worker(threading.Thread):
             subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(p.pid)], stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             with self.store.lock:
-                self.current = (jid, p)
+                self.running[jid] = p
                 j = self.store.load_job(jid)
                 j["pid"] = p.pid
                 self.store.save_job(j)
@@ -638,7 +677,7 @@ class Worker(threading.Thread):
                     p.send_signal(signal.SIGTERM)
             rc = p.wait()
         with self.store.lock:
-            self.current = None
+            self.running.pop(jid, None)
             cancelled = jid in self.cancel_requested
             self.cancel_requested.discard(jid)
         secs = time.time() - t0
@@ -799,7 +838,7 @@ def assemble_upload(store, uid):
                "glb": meta.get("glb", False), "glbTextureSize": meta.get("glbTextureSize"),
                "maxPolygons": meta.get("maxPolygons"), "notify": meta.get("notify", True),
                "inputBytes": size, "inputSha256": digest, "state": "queued", "progress": 0.0,
-               "message": "Waiting for the Mac", "createdAt": now_iso(t), "files": [], "restarts": 0}
+               "message": MESSAGES["queued"], "createdAt": now_iso(t), "files": [], "restarts": 0}
         with store.lock:
             store.save_job(job)
             meta["state"] = "completed"
@@ -1191,7 +1230,7 @@ class Handler(BaseHTTPRequestHandler):
             need = FREE_SPACE_FACTOR * total
             if free - reserved < need:
                 raise ApiError(507, "insufficient_storage",
-                               "The Mac doesn't have enough free disk space for this capture right now. Try again later.",
+                               MESSAGES["insufficient_storage"],
                                freeBytes=free - reserved, requiredBytes=need)
             uid = new_id("up")
             os.makedirs(os.path.join(store.uploads_dir, uid, "chunks"))
@@ -1307,7 +1346,7 @@ class Handler(BaseHTTPRequestHandler):
             q = queue if queue is not None else store.queued_jobs()
             ids = [j["jobID"] for j in q]
             v["queuePosition"] = ids.index(job["jobID"]) + 1 if job["jobID"] in ids else None
-            v["message"] = "Waiting for the Mac (%d in line)" % v["queuePosition"] if v["queuePosition"] and v["queuePosition"] > 1 else (job.get("message") or "Waiting for the Mac")
+            v["message"] = MESSAGES["queued_in_line"] % v["queuePosition"] if v["queuePosition"] and v["queuePosition"] > 1 else (job.get("message") or MESSAGES["queued"])
         elif job["state"] == "processing":
             v["queuePosition"] = 0
             st = read_json(os.path.join(store.job_dir(job["jobID"]), "status.json"), {}) or {}
@@ -1325,7 +1364,7 @@ class Handler(BaseHTTPRequestHandler):
                 v["etaSeconds"] = int(st["etaSeconds"])
             v["message"] = st.get("message") or job.get("message")
             if phase == "waiting":
-                v["message"] = "Waiting for another build on the Mac to finish"
+                v["message"] = MESSAGES["waiting_other_build"]
             if st.get("attempt", 1) and st.get("attempt", 1) > 1:
                 v["message"] += " (retrying with different settings)"
         if job["state"] != "done":
@@ -1381,9 +1420,8 @@ class Handler(BaseHTTPRequestHandler):
         if was == "processing":
             self.app.worker.cancel(jid)
             for _ in range(100):  # up to 10 s for the build to stop
-                with store.lock:
-                    if not (self.app.worker.current and self.app.worker.current[0] == jid):
-                        break
+                if not self.app.worker.is_running(jid):
+                    break
                 time.sleep(0.1)
         with store.lock:
             shutil.rmtree(store.job_dir(jid), ignore_errors=True)
@@ -1533,18 +1571,24 @@ def main():
     def stop(signum, frame):
         log.info("signal %d: shutting down", signum)
         app.worker.stopping = True
-        cur = app.worker.current
+        with app.store.lock:
+            procs = list(app.worker.running.values())
 
         def finish():
             # SIGTERM lets the CLI cancel PhotogrammetrySession and delete its multi-GB temp folder;
             # launchd's ExitTimeOut is 20 s, so give it 15 s before SIGKILL. The job stays
             # 'processing' on disk and is requeued at the head of the queue on the next start.
-            if cur:
+            for p in procs:
                 try:
-                    cur[1].send_signal(signal.SIGTERM)
-                    cur[1].wait(15)
+                    p.send_signal(signal.SIGTERM)
+                except Exception:
+                    pass
+            deadline = time.time() + 15
+            for p in procs:
+                try:
+                    p.wait(max(0.1, deadline - time.time()))
                 except subprocess.TimeoutExpired:
-                    cur[1].kill()
+                    p.kill()
                 except Exception:
                     pass
             httpd.shutdown()

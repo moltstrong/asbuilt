@@ -64,7 +64,7 @@ a 100-photo capture is about 45-60 min. An 800 px smoke of the same set takes ab
 | `asbuilt_cloud/meshing.py`, `export.py`, `colmap_io.py` | Cleanup/decimation, xatlas unwrap, numba rasterizer + photo bake; USDZ via `usd-core`, OBJ, thumbnail; COLMAP readers. |
 | `asbuilt_cloud/runner.py`, `gpu_entry.py` | One-build entry point (`--stages fake` = CPU stand-ins for tests) and the Modal function body (any build container). |
 | `asbuilt_cloud/gsplat_train.py`, `splatmesh.py`, `splatrender*.py`, `Dockerfile` | Optional GPU splat path (CUDA image). |
-| `tests/test_cloudrecon.py` | 15 tests; no GPU, no OpenMVS, no account needed. |
+| `tests/test_cloudrecon.py` | 18 tests; no GPU, no OpenMVS, no account needed. |
 
 ## Metric scale (LiDAR) and orientation
 
@@ -87,7 +87,7 @@ On the stump the result matches Apple's frame (ground within 2.4° of level).
 ```bash
 uv venv -p 3.12 /tmp/cr && VIRTUAL_ENV=/tmp/cr uv pip install "numpy<2.4" scipy numba scikit-image "open3d==0.20.0" \
     xatlas usd-core plyfile pillow pillow-heif pycolmap==4.2.1 pytest modal
-cd CloudRecon && /tmp/cr/bin/python -m pytest tests -q        # 15 passed in ~20 s on the M4
+cd CloudRecon && /tmp/cr/bin/python -m pytest tests -q        # 18 passed in ~23 s on the M4
 ```
 They cover: TSDF sphere; clean → unwrap → bake → USDZ (validators, 64-byte aligned STORE zip) → OBJ; the default
 OpenMVS pipeline with fake SfM/OpenMVS stages through the real crop, bake, scale and orientation code (object at the
@@ -109,7 +109,7 @@ modal deploy CloudRecon/modal_app.py                       # first OpenMVS image
 The URL is `https://<workspace>--asbuilt-recon-api.<region>.modal.run` and stays the same across deploys. The apps
 find it through the discovery gist (`asbuilt-recon.json`: `baseURL`, `apiVersion`, `transport`, `updatedAt`);
 TestFlight builds also bake it in from the `RECON_BASE_URL` secret. Deploy-time env: `ASBUILT_BUILD_CPUS` (16),
-`ASBUILT_BUILD_MEMORY_MB` (32768), `ASBUILT_ENABLE_SPLAT` (off), `ASBUILT_GPU`, `MODAL_APP_NAME`. In the build
+`ASBUILT_BUILD_MEMORY_MB` (32768), `ASBUILT_MAX_CONCURRENT_BUILDS` (3 builds at once), `ASBUILT_ENABLE_SPLAT` (off), `ASBUILT_GPU`, `MODAL_APP_NAME`. In the build
 container: `CLOUD_MAX_SIDE` (2000), `OMVS_THREADS` (all cores), `CLOUD_KEEP_WORK=1` (keep intermediates).
 
 Image notes (Ubuntu 24.04): OpenMVS 2.4.0 needs nanoflann (pinned 1.7.1), libjxl through pkg-config, CGAL ≥ 6.0
@@ -119,10 +119,18 @@ Image notes (Ubuntu 24.04): OpenMVS 2.4.0 needs nanoflann (pinned 1.7.1), libjxl
 Design notes:
 - **API container** (`max_containers=1`): the Mac server keeps its queue and locks in memory, so it stays a single
   process here too. Builds run in separate containers. The API container may scale to zero while a build runs; on
-  restart `CloudWorker.requeue_interrupted` re-attaches to the running call through `gpuCallID` in `job.json`.
+  restart `CloudWorker.requeue_interrupted` re-attaches to every running call through `gpuCallID` in `job.json`
+  (those go before anything newer in the queue).
+- **Parallel builds**: up to `ASBUILT_MAX_CONCURRENT_BUILDS` (default 3) at once, oldest first, each its own
+  `build_cpu` call and container (one `recon_server.Worker` slot thread each; the Mac keeps 1). The v1 API is
+  unchanged: `queuePosition` 0 = building, 1 = next in line. Output copy + GLB conversion on the 1-CPU API
+  container run one job at a time. Cost is per build, so parallel builds cost the same, just sooner.
+- **Wording**: `cloud_server.CLOUD_MESSAGES` replaces recon_server's Mac wording ("Queued in the cloud",
+  "Starting in the cloud", ...) in every message the cloud server sends.
 - **Uploads**: Modal web endpoints accept bodies up to 4 GiB with a 150 s per-request limit, so 8-32 MiB chunks fit.
-- **Volume consistency**: the build container writes only to `results/<job>/` and commits; the API reloads before
-  copying into `jobs/<job>/out`. Logs live in `/tmp`, not on the Volume (open files block `Volume.reload()`).
+- **Volume consistency**: the build container writes only to `results/<job>/` and commits; the API copies them into
+  `jobs/<job>/out` through the volume service and never calls `Volume.reload()` (a reload remounts `/data`, so the
+  other build slots' polls and the phone's chunk PUTs failed with EPERM for that moment). Logs live in `/tmp`, not on the Volume (open files block `Volume.reload()`).
 - **"Model ready" notice**: the Mac texted the owner through BlueBubbles; the cloud can't (the BlueBubbles password
   never leaves the Mac). The iOS app posts a local notification instead, when the model lands and, while suspended,
   from background status checks it schedules itself (`AsBuilt/Capture/ReconReadyNotifier.swift`).

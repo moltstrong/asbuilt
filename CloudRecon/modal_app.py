@@ -5,8 +5,10 @@
 Functions:
   api        CPU container, `@modal.web_server` running cloud_server.py (= MacRecon/server/recon_server.py's
              HTTP handler + a CloudWorker). max_containers=1 because the server keeps its queue/locks in-process
-             (exactly like the Mac). Scales to zero after `scaledown_window`; on the next request it restarts and
-             re-attaches to any build still running (job.json keeps the FunctionCall id).
+             (exactly like the Mac). The CloudWorker runs up to ASBUILT_MAX_CONCURRENT_BUILDS (default 3) builds
+             at once, oldest first, each one its own build_cpu call/container. Scales to zero after
+             `scaledown_window`; on the next request it restarts and re-attaches to every build still running
+             (job.json keeps the FunctionCall id).
   build_cpu  CPU container (16 cores / 32 GiB, no GPU) running one build: HEIC decode (+ LiDAR depth) ->
              pycolmap SfM -> OpenMVS v2.4.0 densify / mesh / refine -> automatic crop -> two-band photo bake
              (250k tris, 8K) -> metric scale from LiDAR, Y-up, object at the origin -> USDZ/OBJ (+GLB by the API).
@@ -26,6 +28,7 @@ APP_NAME = os.environ.get("MODAL_APP_NAME", "asbuilt-recon")
 ENABLE_SPLAT = os.environ.get("ASBUILT_ENABLE_SPLAT") == "1"
 BUILD_CPUS = float(os.environ.get("ASBUILT_BUILD_CPUS", "16"))
 BUILD_MEMORY_MB = int(os.environ.get("ASBUILT_BUILD_MEMORY_MB", str(32 * 1024)))
+MAX_CONCURRENT_BUILDS = max(1, int(os.environ.get("ASBUILT_MAX_CONCURRENT_BUILDS", "3")))  # build containers at once
 OPENMVS_PATCH = HERE / "bakeoff" / "openmvs" / "openmvs-2.4.0-seam-leveling-fix.patch"
 
 app = modal.App(APP_NAME)
@@ -95,7 +98,8 @@ def api():
     import subprocess
     # Logs live off the volume: an always-open log file on /data would make every Volume.reload() fail ("volume busy").
     env = dict(os.environ, PYTHONPATH="/app", RECON_SERVER_DIR="/app", MODAL_APP_NAME=APP_NAME,
-               CLOUD_IGNORE_DISK_CHECK="1", ASBUILT_LOG_DIR="/tmp/asbuilt-logs", ASBUILT_BUILD_FUNCTION="build_cpu")
+               CLOUD_IGNORE_DISK_CHECK="1", ASBUILT_LOG_DIR="/tmp/asbuilt-logs", ASBUILT_BUILD_FUNCTION="build_cpu",
+               ASBUILT_MAX_CONCURRENT_BUILDS=str(MAX_CONCURRENT_BUILDS))
     subprocess.Popen(["python", "/app/cloud_server.py", "--host", "0.0.0.0", "--port", "8000", "--data", "/data",
                       "--backend", "modal", "--verbose"], env=env, cwd="/app")
 

@@ -48,7 +48,7 @@ Rate limit: GitHub allows 60 unauthenticated gist reads per hour per IP, so only
 | Chunk size | default **32 MiB** (33,554,432). You may request 4-64 MiB in whole MiB with `chunkSize`. Use 8 MiB on cellular and 32 MiB on Wi-Fi. Cloudflare rejects request bodies over 100 MB |
 | Free disk | the server needs 3 × `totalBytes` free (less what open uploads have reserved), else 507 `insufficient_storage` |
 | Retention | uploads, jobs and their files are deleted 7 days after their last activity (`expiresAt`) |
-| Builds | one at a time, FIFO. Full detail for a 41-photo, 168 MB set on the M4 takes about 4-8 min |
+| Builds | Mac: one at a time, FIFO. Full detail for a 41-photo, 168 MB set on the M4 takes about 4-8 min. Cloud (`CloudRecon/`): up to 3 at once (`ASBUILT_MAX_CONCURRENT_BUILDS`), oldest first |
 
 ## 4. Routes
 
@@ -147,7 +147,7 @@ For multi-GB files this takes a few seconds (≈0.2 s for 168 MB), so use a 120 
 | field | meaning |
 |---|---|
 | `state` | `queued` → `processing` → `done` \| `failed`. A server restart puts `processing` back to `queued` at the head of the queue (`restarts` += 1) |
-| `queuePosition` | `queued`: 1 = next. `processing`: 0. Otherwise `null` |
+| `queuePosition` | `queued`: 1 = next (starts when a build slot frees up). `processing`: 0. Otherwise `null` |
 | `progress` | 0-1, monotonic within one attempt. It can drop back if Apple's auto-retry kicks in ("retrying with different settings") or after a restart |
 | `etaSeconds` | Apple's estimate while processing, else `null`. It's noisy, so smooth it |
 | `stage` | `preProcessing`, `imageAlignment`, `pointCloudGeneration`, `meshGeneration`, `textureMapping`, `optimization`, `extracting`, `inspecting`, or `null` |

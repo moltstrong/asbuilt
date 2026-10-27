@@ -8,6 +8,9 @@
   asbuilt-recon v1 flow with stdlib http.client: health, auth 401, create upload, chunk PUT with sha,
   resume (GET upload), complete, job polling with stage/progress, Range download + sha256, model.glb
   conversion (recon_server.obj_to_glb), no splat.ply on the default OpenMVS path, job list, delete,
+* concurrency tests: a gated fake backend proves 3 builds overlap, the 4th/5th wait in line with cloud wording
+  (never "Mac"), a deleted running build frees its slot, all finish with correct state; and a restart re-attaches
+  every running build before newer queued work,
 * gpu_entry test: the Modal function body with a dict as the status channel,
 * modal_app import test: the deployment file builds its App/functions locally (no login, no network).
 """
@@ -486,3 +489,268 @@ def test_http_failed_build_reports_plain_error(server, tmp_path):
         time.sleep(0.3)
     assert job["state"] == "failed"
     assert job["error"]["code"] == "build_failed" and "photos" in job["error"]["message"]
+
+
+# ---------------------------------------------------------------------------------------------
+# Concurrency: several cloud builds at once
+
+
+class GateBackend:
+    """Fake cloud backend: every spawned build 'runs' until the test releases it; records the overlap."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.calls = {}      # call id -> {"jid", "release": Event, "reattach": bool}
+        self.spawned = []    # jobIDs, in spawn order
+        self.cancelled = []  # call ids
+        self.active = set()
+        self.max_active = 0
+
+    def add_call(self, cid, jid):
+        with self.lock:
+            self.calls[cid] = {"jid": jid, "release": threading.Event()}
+
+    def spawn(self, job, input_zip, out_dir, status_path):
+        assert os.path.isfile(input_zip)
+        with self.lock:
+            cid = "fc-%d" % (len(self.calls) + 1)
+            self.calls[cid] = {"jid": job["jobID"], "release": threading.Event()}
+            self.spawned.append(job["jobID"])
+        return cid
+
+    def poll(self, call_id, job, status_path):
+        c = self.calls[call_id]
+        assert c["jid"] == job["jobID"]  # each slot polls its own call
+        with self.lock:
+            if c["release"].is_set():
+                self.active.discard(call_id)
+                return True, None
+            self.active.add(call_id)
+            self.max_active = max(self.max_active, len(self.active))
+        return False, {"state": "processing", "fraction": 0.5, "stage": "densify", "message": "Building the mesh"}
+
+    def cancel(self, call_id):
+        with self.lock:
+            self.cancelled.append(call_id)
+            self.active.discard(call_id)
+        self.calls[call_id]["release"].set()
+
+    def fetch_outputs(self, job, out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "model.usdz"), "wb") as f:
+            f.write(b"usdz " + job["jobID"].encode())
+        with open(os.path.join(out_dir, "result.json"), "w") as f:
+            json.dump({"ok": True, "polygons": 1234, "textures": [], "usdcheckerPassed": True, "totalSeconds": 1.0}, f)
+
+    def release(self, jid):
+        for c in self.calls.values():
+            if c["jid"] == jid:
+                c["release"].set()
+
+
+def _wait_for(pred, what, timeout=20):
+    t0 = time.time()
+    while not pred():
+        assert time.time() - t0 < timeout, "timed out waiting for " + what
+        time.sleep(0.05)
+
+
+@pytest.fixture()
+def gated_server(tmp_path):
+    """A second cloud server with a GateBackend, on its own handler class (rs.Handler.app stays untouched)."""
+    import cloud_server
+    rs = cloud_server.rs
+    prev = rs.Handler.app
+    backend = GateBackend()
+    app = cloud_server.make_app(str(tmp_path / "data"), KEY, backend, concurrency=3)
+    rs.Handler.app = prev
+    app.worker.POLL_SECONDS = 0.05
+    handler = type("GatedHandler", (rs.Handler,), {"app": app})
+    port = _free_port()
+    httpd = rs.Server(("127.0.0.1", port), handler)
+    threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True).start()
+    app.worker.start()
+    yield port, app, backend
+    app.worker.stopping = True
+    for c in backend.calls.values():
+        c["release"].set()
+    httpd.shutdown()
+
+
+def _submit(c, blob, cap):
+    sha = hashlib.sha256(blob).hexdigest()
+    st, up = c.req("POST", "/v1/uploads", {"captureID": cap, "filename": "Images.zip", "totalBytes": len(blob),
+                                           "sha256": sha, "detail": "phone", "chunkSize": 4 * 1024 * 1024})
+    assert st == 201, up
+    st, _ = c.req("PUT", "/v1/uploads/%s/chunks/0" % up["uploadID"], blob, {"X-Chunk-SHA256": sha})
+    assert st == 200
+    st, done = c.req("POST", "/v1/uploads/%s/complete" % up["uploadID"])
+    assert st == 201, done
+    return done["jobID"]
+
+
+def test_cloud_runs_three_builds_at_once_and_queues_the_rest(gated_server, tmp_path):
+    port, app, backend = gated_server
+    c = Client(port)
+    assert app.worker.concurrency == 3
+    import cloud_server
+    assert set(cloud_server.CLOUD_MESSAGES) == set(cloud_server.rs.MESSAGES)  # every Mac message has a cloud one
+    assert not [v for v in cloud_server.rs.MESSAGES.values() if "Mac" in v]
+    blob = open(make_zip(str(tmp_path / "Images.zip"), n=3), "rb").read()
+
+    def job(jid):
+        st, v = c.req("GET", "/v1/jobs/%s" % jid)
+        assert st == 200
+        assert "Mac" not in json.dumps(v), v  # cloud wording only
+        return v
+
+    def health():
+        st, h = c.req("GET", "/v1/health")
+        assert st == 200
+        return h
+
+    running = []
+    for i in range(3):  # each one starts right away in its own slot
+        running.append(_submit(c, blob, "cap-%d" % i))
+        _wait_for(lambda: job(running[-1])["state"] == "processing", "build %d to start" % i)
+    _wait_for(lambda: backend.max_active == 3, "3 overlapping builds")
+    for jid in running:
+        v = job(jid)
+        assert v["state"] == "processing" and v["queuePosition"] == 0 and v["stage"] == "densify"
+    h = health()
+    assert h["processing"] is True and h["queueLength"] == 0
+
+    # 4th and 5th wait in line (no slot), with cloud wording
+    fourth = _submit(c, blob, "cap-3")
+    time.sleep(1.05)  # createdAt has 1 s resolution (same-second ties go by jobID): make the line order certain
+    fifth = _submit(c, blob, "cap-4")
+    time.sleep(0.5)
+    v4, v5 = job(fourth), job(fifth)
+    assert v4["state"] == "queued" and v4["queuePosition"] == 1 and v4["message"] == "Queued in the cloud", v4
+    assert v5["state"] == "queued" and v5["queuePosition"] == 2 and v5["message"] == "Queued in the cloud (2 in line)", v5
+    assert backend.spawned == running and len(app.worker.running) == 3
+    assert health()["queueLength"] == 2
+    st, lst = c.req("GET", "/v1/jobs")
+    assert sorted(j["queuePosition"] for j in lst["jobs"]) == [0, 0, 0, 1, 2] and "Mac" not in json.dumps(lst)
+
+    # deleting a running build cancels only its call and frees its slot for the oldest queued job
+    st, d = c.req("DELETE", "/v1/jobs/%s" % running[0])
+    assert st == 200 and d["previousState"] == "processing"
+    assert [backend.calls[x]["jid"] for x in backend.cancelled] == [running[0]]
+    _wait_for(lambda: job(fourth)["state"] == "processing", "the 4th build to take the freed slot")
+    assert job(fifth)["queuePosition"] == 1 and job(fifth)["message"] == "Queued in the cloud"
+
+    # one finishes -> the 5th starts; the others keep running
+    backend.release(running[1])
+    _wait_for(lambda: job(running[1])["state"] == "done", "build 2 to finish")
+    _wait_for(lambda: job(fifth)["state"] == "processing", "the 5th build to start")
+    assert job(running[2])["state"] == "processing" and job(fourth)["state"] == "processing"
+
+    for jid in (running[2], fourth, fifth):
+        backend.release(jid)
+    for jid in (running[1], running[2], fourth, fifth):
+        _wait_for(lambda: job(jid)["state"] == "done", "build %s to finish" % jid)
+        v = job(jid)
+        assert v["progress"] == 1.0 and v["polygons"] == 1234 and v["queuePosition"] is None
+        assert [f["name"] for f in v["files"] if f["name"] == "model.usdz"] == ["model.usdz"]
+        stored = app.store.load_job(jid)
+        assert "gpuCallID" not in stored and stored["state"] == "done"
+        st, body, _ = c.req("GET", "/v1/jobs/%s/files/model.usdz" % jid, raw=True)
+        assert st == 200 and body == b"usdz " + jid.encode()  # every job got its own outputs
+    assert backend.max_active == 3  # never more than the limit
+    assert backend.spawned == running + [fourth, fifth]
+    _wait_for(lambda: not app.worker.running, "all slots to free up")
+    h = health()
+    assert h["processing"] is False and h["queueLength"] == 0
+    assert not app.worker.cancel_requested
+
+
+def test_cloud_restart_reattaches_every_running_build_first(tmp_path):
+    import cloud_server
+    rs = cloud_server.rs
+    prev = rs.Handler.app
+    backend = GateBackend()
+    data = str(tmp_path / "data")
+    store = rs.Store(data)
+
+    def put(jid, state, created, call=None):
+        os.makedirs(store.job_dir(jid))
+        with open(os.path.join(store.job_dir(jid), "input.zip"), "wb") as f:
+            f.write(b"zip")
+        j = {"jobID": jid, "captureID": jid, "detail": "phone", "state": state, "progress": 0.3,
+             "createdAt": created, "files": [], "restarts": 0, "message": "Building"}
+        if call:
+            j["gpuCallID"] = call
+            backend.add_call(call, jid)
+        store.save_job(j)
+
+    # an old queued job (e.g. the limit was lowered) and three builds still running in the cloud
+    put("job_old_queued", "queued", "2026-01-01T00:00:00Z")
+    for i in range(3):
+        put("job_running_%d" % i, "processing", "2026-01-02T00:00:0%dZ" % i, call="call-%d" % i)
+    put("job_fresh_none", "processing", "2026-01-02T00:00:09Z")  # spawned nothing before the restart
+
+    app = cloud_server.make_app(data, KEY, backend, concurrency=3)
+    rs.Handler.app = prev
+    app.worker.POLL_SECONDS = 0.05
+    for jid in ("job_running_0", "job_running_1", "job_running_2"):
+        j = app.store.load_job(jid)
+        assert j["state"] == "queued" and j["gpuCallID"] and j["message"] == "Reconnecting to the cloud build"
+    assert app.store.load_job("job_fresh_none")["restarts"] == 1
+    app.worker.start()
+    try:
+        _wait_for(lambda: len(app.worker.running) == 3, "3 re-attached builds")
+        assert sorted(app.worker.running) == ["job_running_0", "job_running_1", "job_running_2"]
+        assert backend.spawned == []  # re-attached, nothing started over
+        assert app.store.load_job("job_old_queued")["state"] == "queued"
+        for i in range(3):
+            backend.release("job_running_%d" % i)
+        _wait_for(lambda: all(app.store.load_job("job_running_%d" % i)["state"] == "done" for i in range(3)),
+                  "re-attached builds to finish")
+        _wait_for(lambda: sorted(backend.spawned) == ["job_fresh_none", "job_old_queued"], "the other two to start")
+        for jid in ("job_old_queued", "job_fresh_none"):
+            backend.release(jid)
+        _wait_for(lambda: all(j["state"] == "done" for j in app.store.all_jobs()), "everything to finish")
+        assert backend.max_active <= 3
+    finally:
+        app.worker.stopping = True
+        for c in backend.calls.values():
+            c["release"].set()
+
+
+def test_modal_backend_copies_outputs_without_reloading_the_volume(tmp_path):
+    """fetch_outputs reads results/<id>/out through the volume service (no Volume.reload(): it remounts /data
+    under the other build slots), keeps the folder layout, then removes results/<id>."""
+    import enum
+    import types
+    from modal_backend import ModalBackend
+
+    Kind = enum.Enum("Kind", "FILE DIRECTORY")
+    blobs = {"results/job_x/out/model.usdz": b"usdz", "results/job_x/out/obj/tex/d.jpg": b"jpg",
+             "results/job_x/out/result.json": b"{}"}
+
+    class FakeVolume:
+        removed = []
+
+        def reload(self):
+            raise AssertionError("the API container must not reload the volume")
+
+        def listdir(self, path, recursive=False):
+            assert path == "results/job_x/out" and recursive
+            yield types.SimpleNamespace(path="results/job_x/out/obj", type=Kind.DIRECTORY)
+            for k in blobs:
+                yield types.SimpleNamespace(path=k, type=Kind.FILE)
+
+        def read_file_into_fileobj(self, path, f):
+            f.write(blobs[path])
+
+        def remove_file(self, path, recursive=False):
+            self.removed.append((path, recursive))
+
+    be = object.__new__(ModalBackend)
+    be.volume, be.status, be.volume_lock = FakeVolume(), {"job_x": {"status": {}}}, threading.Lock()
+    out = tmp_path / "jobs" / "job_x" / "out"
+    assert be.fetch_outputs({"jobID": "job_x"}, str(out)) == 4
+    assert (out / "model.usdz").read_bytes() == b"usdz" and (out / "obj" / "tex" / "d.jpg").read_bytes() == b"jpg"
+    assert not list(out.rglob("*.part"))
+    assert FakeVolume.removed == [("results/job_x", True)] and "job_x" not in be.status
