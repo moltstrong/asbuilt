@@ -73,6 +73,8 @@ struct RootView: View {
                         MeasurementsView(jobID: jobID)
                     case .coachPreview(let name):
                         CoachPreviewView(scenario: CoachDemo.Scenario(rawValue: name) ?? .midScan)
+                    case .objectPlacePreview:
+                        ObjectPlacePreviewView()
                     case .remoteBuildPreview(let name):
                         RemoteBuildPreviewView(scenario: name)
                     }

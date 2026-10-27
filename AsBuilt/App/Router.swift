@@ -28,6 +28,8 @@ enum Route: Hashable {
     case measurements(UUID)
     /// Capture Coach HUD driven by synthetic metrics (CI screenshots; the Simulator has no AR).
     case coachPreview(String)
+    /// Object Detail scan placement step (box fit) on synthetic depth (CI screenshots).
+    case objectPlacePreview
     /// "Full detail in the cloud" progress card with synthetic states (CI screenshots).
     case remoteBuildPreview(String)
 }
@@ -36,7 +38,7 @@ enum Route: Hashable {
 /// `xcrun simctl launch booted com.moltstrong.asbuilt -AsBuiltScreen plan`.
 struct LaunchOptions {
     /// jobs | job | plan | takeoff | takeoff-walls | model | files | kitchen | mesh | mesh-files | mesh-quicklook |
-    /// detail | detail-files | measurements | coach | coach-fast | coach-far | coach-band | coach-grade |
+    /// detail | detail-files | detail-place | measurements | coach | coach-fast | coach-far | coach-band | coach-grade |
     /// mac-build | mac-build-done | mac-build-offline | mac-build-upload | capabilities | settings
     var screen: String?
     var resetDemo: Bool
@@ -79,6 +81,7 @@ final class Router: ObservableObject {
         case "mesh-files": return [.job(job), .capture(job: job, capture: SampleData.demoMeshCaptureID, tab: .files)]
         case "detail": return [.job(job), .capture(job: job, capture: SampleData.demoDetailCaptureID, tab: .model)]
         case "detail-files": return [.job(job), .capture(job: job, capture: SampleData.demoDetailCaptureID, tab: .files)]
+        case "detail-place": return [.objectPlacePreview]
         case "measurements": return [.job(job), .measurements(job)]
         case "coach", "coach-fast", "coach-far", "coach-band", "coach-grade": return [.coachPreview(screen ?? "coach")]
         case "mac-build", "mac-build-done", "mac-build-offline", "mac-build-upload": return [.remoteBuildPreview(screen ?? "mac-build")]

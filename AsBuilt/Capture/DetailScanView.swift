@@ -5,13 +5,18 @@ import AsBuiltCore
 import ARKit
 import RealityKit
 
-/// Detail scan: TSDF fusion of LiDAR depth maps (4 mm voxels, <= 1.5 m, high-confidence depth only).
+/// Object Detail scan: box the object, then fuse LiDAR depth inside the box.
 ///
-/// Per ARKit frame (main queue) the model computes cheap coach metrics; when the coach says the
-/// technique is good and the pose moved enough, it copies depth + confidence (256 x 192), a
-/// ~960 x 720 YCbCr copy of the camera image, the intrinsics and the pose into plain buffers and hands
-/// them to one serial fusion queue. Frames arriving while the queue is busy are dropped (at most one
-/// copy in flight, so memory stays bounded). ARFrames are never retained.
+/// 1. **Place** (`.ready`): every ~0.4 s the current depth map (plain copy) is handed to
+///    `ObjectBoxFitter` on the fusion queue together with ARKit's horizontal plane heights; the fitted
+///    box is drawn as a 3D wireframe and blended toward each new fit so it settles instead of jumping.
+///    +/- per axis and pinch resize it (auto-fit stops until "Fit again").
+/// 2. **Scan**: Start locks the box. The voxel follows the box (`TSDFVolume.Configuration.object`),
+///    fusion is limited to the box plus a margin, and the coach measures coverage around the box center
+///    and distance to the box. Frames are copied into plain buffers and fused on one serial queue;
+///    frames arriving while it is busy are dropped. ARFrames are never retained.
+/// 3. **Finish**: extract, crop to the box, drop the table, keep the object, export with W x D x H
+///    measured from the table.
 final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
     enum Phase: Equatable {
         case unsupported
@@ -40,19 +45,25 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published private(set) var canRestart = true
     @Published private(set) var droppedFrames = 0
     @Published private(set) var videoFormatText = ""
+    /// The object box (placement: live fit or user-sized; scanning: locked).
+    @Published private(set) var box: ObjectBox?
+    @Published private(set) var placementStatus: ObjectPlacementPanel.Status = .searching
+    /// Voxel size of the running scan (m).
+    @Published private(set) var voxelSize: Float = 0.002
 
     let isSupported = ARWorldTrackingConfiguration.isSupported
         && ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
-    let configuration = TSDFVolume.Configuration.detail
 
     /// Set by the view; receives every frame's coach metrics (delegate callbacks are on the main queue).
     var onCoachFrame: (@MainActor (CoachFrame) -> CoachOutput?)?
+    /// Set by the view: the box was locked (Start) and coverage should be measured around its center.
+    var onBoxLocked: ((ObjectBox) -> Void)?
 
     private weak var arView: ARView?
     private var previewRunning = false
     private let fusionQueue = DispatchQueue(label: "com.moltstrong.asbuilt.tsdf", qos: .userInitiated)
     /// Only touched on `fusionQueue`.
-    private var volume: TSDFVolume
+    private var volume = TSDFVolume(configuration: .detail)
     /// Main-thread flag: one frame copy in flight at most.
     private var fusionBusy = false
     private var lastIntegratedPose: simd_float4x4?
@@ -63,8 +74,19 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
     private var usedFallbackFormat = false
     private var generation = 0
 
+    // Placement.
+    private var planeY: Float?
+    private var autoFit = true
+    private var replaceNextFit = true
+    private var fitInFlight = false
+    private var lastFitTime: TimeInterval = -1
+    /// Box, margin and bounds of the running scan.
+    private var lockedBox: ObjectBox?
+    private var margin: Float = 0.015
+    private var fusionBounds: (min: SIMD3<Float>, max: SIMD3<Float>)?
+    private let wireframe = BoxWireframeEntity()
+
     override init() {
-        volume = TSDFVolume(configuration: .detail)
         super.init()
         if !isSupported { phase = .unsupported }
     }
@@ -72,11 +94,12 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
     func attach(_ view: ARView) {
         arView = view
         view.session.delegate = self
+        view.scene.addAnchor(wireframe.anchor)
         prepare()
     }
 
-    /// Camera preview + tracking warm-up with the full Detail configuration (the coach's pre-flight
-    /// needs depth and light estimates before Start).
+    /// Camera preview, plane detection and tracking warm-up (the box fit and the coach's pre-flight
+    /// need depth, planes and light estimates before Start).
     func prepare() {
         guard isSupported, let view = arView, phase == .ready, !previewRunning else { return }
         previewRunning = true
@@ -88,14 +111,12 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
         c.worldAlignment = .gravity
         c.environmentTexturing = .none
         c.isLightEstimationEnabled = true
+        // Table / floor heights for the box fit (the fitter checks them against the depth points).
+        c.planeDetection = [.horizontal]
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
             c.frameSemantics.insert(.smoothedSceneDepth)
         } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             c.frameSemantics.insert(.sceneDepth)
-        }
-        // Live overlay: ARKit's own scene mesh (fusion uses the depth maps, not this mesh).
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-            c.sceneReconstruction = .mesh
         }
         // Camera stream: keep a 4:3 format (1920 x 1440 by default) so the 256 x 192 depth map and the
         // ~960 x 720 color copy share one field of view and the scaled intrinsics stay exact. 16:9
@@ -110,12 +131,102 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
         return c
     }
 
+    // MARK: Placement
+
+    /// +/- on one side (0 width, 1 height, 2 depth); auto-fit stops until "Fit again".
+    func adjust(axis: Int, by delta: Float) {
+        guard phase == .ready, let box else { return }
+        setManualBox(box.resized(axis: axis, by: delta))
+    }
+
+    /// Pinch: `base` is the box when the pinch began.
+    func scale(_ base: ObjectBox, by factor: Float) {
+        guard phase == .ready else { return }
+        setManualBox(base.scaled(by: factor))
+    }
+
+    private func setManualBox(_ b: ObjectBox) {
+        autoFit = false
+        box = b
+        placementStatus = .adjusted
+        wireframe.update(box: b, color: .systemYellow)
+    }
+
+    func fitAgain() {
+        guard phase == .ready else { return }
+        autoFit = true
+        replaceNextFit = true
+        lastFitTime = -1
+        placementStatus = box == nil ? .searching : placementStatus
+    }
+
+    private func maybeFit(_ frame: ARFrame) {
+        guard autoFit, !fitInFlight, frame.timestamp - lastFitTime >= 0.4, let depth = ARFrameCopy.depth(frame) else { return }
+        lastFitTime = frame.timestamp
+        fitInFlight = true
+        let intrinsics = PinholeIntrinsics(arkit: frame.camera.intrinsics,
+                                           imageWidth: Int(frame.camera.imageResolution.width),
+                                           imageHeight: Int(frame.camera.imageResolution.height))
+            .scaled(toWidth: depth.width, height: depth.height)
+        let pose = frame.camera.transform
+        let planes = Self.horizontalPlaneHeights(frame)
+        let g = generation
+        fusionQueue.async { [weak self] in
+            let depthFrame = DepthFrame(width: depth.width, height: depth.height, depth: depth.depth,
+                                        confidence: depth.confidence, intrinsics: intrinsics, cameraToWorld: pose)
+            let result = ObjectBoxFitter.fit(frame: depthFrame, planeCandidates: planes)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.fitInFlight = false
+                guard g == self.generation, self.phase == .ready, self.autoFit, let result else { return }
+                self.acceptFit(result)
+            }
+        }
+    }
+
+    /// A new fit replaces the box when it is somewhere else (aimed at another object) or after "Fit
+    /// again"; otherwise the box moves a third of the way toward it, so it settles instead of jumping.
+    private func acceptFit(_ result: ObjectBoxFitter.Result) {
+        var next = result.box
+        if let old = box, !replaceNextFit {
+            let aligned = next.reoriented(near: old)
+            let moved = simd_distance(aligned.center, old.center)
+            let resized = simd_reduce_max(abs(aligned.size - old.size))
+            if moved < 0.08, resized < 0.10 { next = old.blended(toward: aligned, weight: 0.35) }
+        }
+        replaceNextFit = false
+        box = next
+        planeY = result.planeY
+        placementStatus = .fitted(onPlane: result.planeY != nil)
+        wireframe.update(box: next, color: .systemYellow)
+    }
+
+    /// World heights of ARKit's horizontal planes (plain floats: no anchor is kept).
+    static func horizontalPlaneHeights(_ frame: ARFrame) -> [Float] {
+        frame.anchors.compactMap { anchor -> Float? in
+            guard let plane = anchor as? ARPlaneAnchor, plane.alignment == .horizontal else { return nil }
+            return (plane.transform * SIMD4(plane.center, 1)).y
+        }
+    }
+
+    // MARK: Scan
+
     func startScanning() {
-        guard isSupported else { return }
+        guard isSupported, let box else { return }
         if !previewRunning, let view = arView {
             previewRunning = true
             view.session.run(makeConfiguration())
         }
+        let configuration = TSDFVolume.Configuration.object(for: box)
+        let margin = ObjectScan.margin(voxelSize: configuration.voxelSize)
+        lockedBox = box
+        self.margin = margin
+        fusionBounds = box.aabb(margin: margin)
+        voxelSize = configuration.voxelSize
+        fusionQueue.async { [weak self] in self?.volume = TSDFVolume(configuration: configuration) }
+        stats = TSDFVolume.Stats()
+        wireframe.update(box: box, color: UIColor(red: 0.2, green: 0.8, blue: 0.35, alpha: 1))
+        onBoxLocked?(box)
         phase = .scanning
         UIApplication.shared.isIdleTimerDisabled = true
     }
@@ -124,7 +235,9 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
     func pause() { if phase == .scanning { phase = .paused } }
     func resume() { if phase == .paused { phase = .scanning } }
 
-    func reset() {
+    /// Back to placement. The fused volume is dropped; the box stays (same world coordinates) unless
+    /// the AR session has to restart (after a failure or a finished scan), which resets tracking.
+    func reset(restartSession: Bool = false) {
         processingWork?.cancel()
         processingWork = nil
         generation += 1
@@ -143,10 +256,22 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
         framesSinceIntegration = 0
         droppedFrames = 0
         progress = 0
+        lockedBox = nil
+        fusionBounds = nil
+        fitInFlight = false
         if isSupported { phase = .ready }
-        if let view = arView {
+        if restartSession || !previewRunning, let view = arView {
             previewRunning = true
             view.session.run(makeConfiguration(), options: [.resetTracking, .removeExistingAnchors])
+            // Tracking restarts with a new world origin: the old box would float somewhere else.
+            box = nil
+            planeY = nil
+            autoFit = true
+            replaceNextFit = true
+            placementStatus = .searching
+            wireframe.hide()
+        } else if let box {
+            wireframe.update(box: box, color: .systemYellow)
         }
     }
 
@@ -164,9 +289,11 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         // Everything read from `frame` is copied before this method returns.
-        let coachFrame = ARFrameCopy.coachFrame(frame)
+        let raw = ARFrameCopy.coachFrame(frame)
+        let coachFrame = (lockedBox ?? box).map { ObjectScan.coachFrame(raw, box: $0) } ?? raw
         let output = ARFrameCopy.onMain { onCoachFrame?(coachFrame) } ?? nil
-        guard phase == .scanning, let output else {
+        if phase == .ready { maybeFit(frame) }
+        guard phase == .scanning, let output, let bounds = fusionBounds else {
             updateTint(frame)
             return
         }
@@ -191,7 +318,7 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
                     let depthFrame = DepthFrame(width: depth.width, height: depth.height, depth: depth.depth,
                                                 confidence: depth.confidence, intrinsics: intrinsics,
                                                 cameraToWorld: pose, color: rgb)
-                    self.volume.integrate(depthFrame)
+                    self.volume.integrate(depthFrame, bounds: bounds)
                     let stats = self.volume.stats
                     // Tint samples every ~12 fused frames (cheap: one pass over block headers).
                     let samples = stats.framesIntegrated % 12 == 1 ? self.volume.surfaceSamples(maxCount: 1500) : nil
@@ -242,19 +369,22 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
         tint = points
     }
 
-    // MARK: Stop -> mesh -> files
+    // MARK: Stop -> object mesh -> files
 
     func stopAndProcess(directory: URL, title: String, units: UnitSystem, coachReport: String?,
                         completion: @escaping (MeshMeasurements?) -> Void) {
-        guard phase.isLive else { return }
+        guard phase.isLive, let box = lockedBox else { return }
         phase = .processing
         progress = 0
         progressText = "Finishing fusion"
         ARTorch.set(false)
         arView?.session.pause()
         previewRunning = false
+        wireframe.hide()
         UIApplication.shared.isIdleTimerDisabled = false
         let g = generation
+        let margin = margin
+        let planeY = planeY
         let report: (Double, String) -> Void = { [weak self] value, text in
             DispatchQueue.main.async {
                 guard let self, g == self.generation else { return }
@@ -266,13 +396,16 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
         work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             // Runs after any in-flight integration (same serial queue).
-            let fused = self.volume.extractMesh(minWeight: 3) { report(0.6 * $0, "Extracting surface") }
-            var result: Result<MeshMeasurements, Error>
+            let voxel = self.volume.configuration.voxelSize
+            let fused = self.volume.extractMesh(minWeight: 3) { report(0.5 * $0, "Extracting surface") }
             if work.isCancelled { return }
+            report(0.5, "Separating the object")
+            let cleaned = ObjectMeshCleaner.clean(fused, box: box, margin: margin, planeY: planeY, voxelSize: voxel)
+            var result: Result<MeshMeasurements, Error>
             do {
                 report(0.6, "Writing files")
-                let m = try ExportService.writeFusedScan(fused, to: directory, title: title, units: units,
-                                                         coachReport: coachReport) { report(0.6 + 0.4 * $0, "Writing files") }
+                let m = try ExportService.writeObjectScan(cleaned.mesh, planeY: planeY, to: directory, title: title, units: units,
+                                                          coachReport: coachReport) { report(0.6 + 0.4 * $0, "Writing files") }
                 result = .success(m)
             } catch {
                 result = .failure(error)
@@ -285,7 +418,7 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
                     completion(m)
                 case .failure(let error):
                     self.canRestart = true
-                    self.phase = .failed("Could not build the detail mesh: \(error.localizedDescription)")
+                    self.phase = .failed("Could not build the object model: \(error.localizedDescription)")
                     completion(nil)
                 }
             }
@@ -294,16 +427,16 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
         fusionQueue.async(execute: work)
     }
 
-    /// Back to scanning after Discard.
+    /// Back to placement after Discard (the session was paused for processing: restart it).
     func discardResult() {
-        reset()
+        reset(restartSession: true)
     }
 
     // MARK: Session events
 
     func session(_ session: ARSession, didFailWithError error: Error) {
         UIApplication.shared.isIdleTimerDisabled = false
-        // The 4K format with depth + reconstruction can be refused on some devices: retry once with the default format.
+        // The 4K format with depth can be refused on some devices: retry once with the default format.
         if let arError = error as? ARError, arError.code == .unsupportedConfiguration, !usedFallbackFormat {
             usedFallbackFormat = true
             previewRunning = true
@@ -345,16 +478,46 @@ final class DetailScanModel: NSObject, ObservableObject, ARSessionDelegate {
     func sessionShouldAttemptRelocalization(_ session: ARSession) -> Bool { true }
 }
 
-/// Detail scan screen: coach HUD over the camera, fused-confidence tint, live fusion stats.
+/// The object box drawn in the AR scene: 12 thin unlit bars (always crisp, no SwiftUI redraws per frame).
+final class BoxWireframeEntity {
+    let anchor = AnchorEntity(world: .zero)
+    private var bars: [ModelEntity] = []
+
+    init() {
+        let mesh = MeshResource.generateBox(size: 1)
+        for _ in 0..<12 {
+            let bar = ModelEntity(mesh: mesh, materials: [UnlitMaterial(color: .systemYellow)])
+            bars.append(bar)
+            anchor.addChild(bar)
+        }
+        anchor.isEnabled = false
+    }
+
+    func update(box: ObjectBox, color: UIColor, thickness: Float = 0.003) {
+        let corners = box.corners
+        for (k, edge) in ObjectBox.edges.enumerated() {
+            let a = corners[edge.0], b = corners[edge.1]
+            let length = max(1e-4, simd_distance(a, b))
+            let rotation = simd_quatf(from: SIMD3(1, 0, 0), to: (b - a) / length)
+            bars[k].transform = Transform(scale: SIMD3(length + thickness, thickness, thickness), rotation: rotation,
+                                          translation: (a + b) / 2)
+            bars[k].model?.materials = [UnlitMaterial(color: color)]
+        }
+        anchor.isEnabled = true
+    }
+
+    func hide() { anchor.isEnabled = false }
+}
+
+/// Object Detail scan screen: box placement, then the coach HUD over the camera with the
+/// fused-confidence tint and live fusion stats.
 struct DetailScanView: View {
     let jobID: UUID
-    var modePicker: AnyView
     var onFinished: (UUID?) -> Void
 
     @EnvironmentObject private var store: JobStore
     @Environment(\.dismiss) private var dismiss
     @AppStorage(Preferences.unitsKey) private var unitsRaw = UnitSystem.imperial.rawValue
-    @AppStorage("detailAutoStart") private var autoStart = false
     @StateObject private var model = DetailScanModel()
     @StateObject private var coach = CoachDriver(mode: .detail)
     @State private var captureID = UUID()
@@ -362,6 +525,7 @@ struct DetailScanView: View {
     @State private var showingIntro = false
     @State private var report: CoachReport?
     @State private var showGrade = false
+    @State private var pinchBase: ObjectBox?
 
     private var units: UnitSystem { UnitSystem(rawValue: unitsRaw) ?? .imperial }
 
@@ -375,8 +539,20 @@ struct DetailScanView: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
             }
+            if model.phase == .ready {
+                // Pinch anywhere on the camera view to resize the box.
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea()
+                    .gesture(MagnificationGesture()
+                        .onChanged { value in
+                            if pinchBase == nil { pinchBase = model.box }
+                            if let base = pinchBase { model.scale(base, by: Float(value)) }
+                        }
+                        .onEnded { _ in pinchBase = nil })
+            }
             if model.phase.isLive || model.phase == .ready {
-                CoachOverlay(output: coach.output, thresholds: coach.thresholds,
+                CoachOverlay(output: coach.output, thresholds: coach.thresholds, showsSpeed: model.phase.isLive,
                              showsRings: model.phase.isLive, highlightGaps: coach.isFillingGaps,
                              isScanning: model.phase == .scanning)
             }
@@ -400,14 +576,12 @@ struct DetailScanView: View {
         .onAppear {
             coach.onTorch = { on in ARTorch.set(on) }
             model.onCoachFrame = { [weak coach] frame in coach?.update(frame) }
+            model.onBoxLocked = { [weak coach] box in coach?.setOrbitCenter(box.center) }
             model.prepare()
         }
         .onDisappear {
             coach.setTorch(false)
             model.tearDown()
-        }
-        .onChange(of: coach.output?.isReady ?? false) { _, ready in
-            if ready, autoStart, model.phase == .ready { start() }
         }
     }
 
@@ -426,7 +600,7 @@ struct DetailScanView: View {
             if model.phase.isLive {
                 VStack(alignment: .trailing, spacing: 2) {
                     Text("\(model.stats.framesIntegrated) frames fused").font(.headline.monospacedDigit())
-                    Text("\(model.stats.blockCount.formatted()) blocks · \(memoryText)").font(.caption.monospacedDigit())
+                    Text("\(Int((model.voxelSize * 1000).rounded())) mm · \(memoryText)").font(.caption.monospacedDigit())
                 }
                 .padding(.horizontal, 12).padding(.vertical, 8)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
@@ -446,21 +620,17 @@ struct DetailScanView: View {
         switch model.phase {
         case .unsupported:
             card {
-                Image(systemName: "viewfinder").font(.system(size: 48)).foregroundStyle(Theme.accent)
+                Image(systemName: "cube.transparent").font(.system(size: 48)).foregroundStyle(Theme.accent)
                 Text("Detail scan unavailable").font(.title2.bold())
-                Text("Detail scan fuses LiDAR depth maps and needs a LiDAR iPhone or iPad Pro.").multilineTextAlignment(.center)
+                Text(DeviceCapabilitiesSnapshot.detailMessage).multilineTextAlignment(.center)
                 Button("Close") { onFinished(nil); dismiss() }.buttonStyle(BigButtonStyle())
             }
         case .ready:
-            VStack(spacing: 10) {
-                modePicker
-                ReadyStartButton(isReady: coach.output?.isReady ?? false, title: "Start detail scan") { start() }
-                Toggle("Start automatically when ready", isOn: $autoStart)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .tint(CoachColors.good)
-                    .frame(maxWidth: 360)
-            }
+            ObjectPlacementPanel(box: model.box, status: model.placementStatus, units: units,
+                                 isReady: coach.output?.isReady ?? false,
+                                 onAdjust: { axis, delta in model.adjust(axis: axis, by: delta) },
+                                 onFitAgain: { model.fitAgain() },
+                                 onStart: { start() })
         case .scanning, .interrupted, .paused:
             VStack(spacing: 10) {
                 if coach.output?.suggestFinish == true {
@@ -492,7 +662,7 @@ struct DetailScanView: View {
             }
         case .processing:
             card {
-                Text("Building detail mesh").font(.title2.bold())
+                Text("Building the object model").font(.title2.bold())
                 ProgressView(value: model.progress).progressViewStyle(.linear).frame(maxWidth: 280)
                 Text("\(Int(model.progress * 100))% · \(model.progressText)").monospacedDigit()
             }
@@ -507,13 +677,13 @@ struct DetailScanView: View {
                             .background([CoachReport.Grade.a, .b].contains(report.grade) ? CoachColors.good : CoachColors.warn, in: Circle())
                     }
                     VStack(alignment: .leading) {
-                        Text("Detail scan captured").font(.title3.bold())
-                        Text(m.dimensionsText(units)).font(.subheadline.monospacedDigit().weight(.semibold))
+                        Text("Object scanned").font(.title3.bold())
+                        Text(m.objectDimensionsText(units)).font(.subheadline.monospacedDigit().weight(.semibold))
                     }
                 }
-                Text("\(m.triangleCount.formatted()) triangles · 4 mm voxels · colored")
+                Text("\(m.triangleCount.formatted()) triangles · \(Int((model.voxelSize * 1000).rounded())) mm voxels · colored")
                     .font(.footnote).foregroundStyle(.secondary)
-                TextField("Name (e.g. Panel, Valve, Beam joint)", text: $name)
+                TextField("Name (e.g. Ball valve, Pump, Bracket)", text: $name)
                     .textFieldStyle(.roundedBorder)
                     .font(.title3)
                 Button("Save scan") { save(m) }
@@ -532,7 +702,7 @@ struct DetailScanView: View {
                 Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 44)).foregroundStyle(Theme.warn)
                 Text(message).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
                 if model.canRestart {
-                    Button("Restart scan") { coach.reset(); model.reset() }.buttonStyle(BigButtonStyle())
+                    Button("Restart scan") { coach.reset(); model.reset(restartSession: true) }.buttonStyle(BigButtonStyle())
                 }
                 Button("Close") { model.tearDown(); onFinished(nil); dismiss() }
                     .buttonStyle(BigButtonStyle(filled: !model.canRestart))
@@ -582,8 +752,9 @@ struct DetailScanView: View {
     }
 
     private func save(_ m: MeshMeasurements) {
+        let voxel = Int((model.voxelSize * 1000).rounded())
         let capture = Capture(id: captureID, kind: .mesh, origin: .detailScan, title: titleForExport,
-                              notes: "Detail scan (LiDAR depth fusion, 4 mm voxels): \(m.dimensionsText(.metric)) (W × D × H), \(m.triangleCount) triangles.",
+                              notes: "Object Detail scan (LiDAR depth fusion inside a fitted box, \(voxel) mm voxels, table removed): \(m.objectDimensionsText(.metric)) (W × D × H), \(m.triangleCount) triangles.",
                               measurements: m, coachGrade: report?.grade.rawValue, coachFix: report?.fix)
         store.addCapture(capture, to: jobID)
         model.tearDown()
@@ -597,7 +768,6 @@ struct DetailARViewContainer: UIViewRepresentable {
 
     func makeUIView(context: Context) -> ARView {
         let view = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
-        view.debugOptions.insert(.showSceneUnderstanding)
         view.renderOptions.insert(.disableMotionBlur)
         view.renderOptions.insert(.disableDepthOfField)
         view.renderOptions.insert(.disablePersonOcclusion)

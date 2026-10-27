@@ -39,7 +39,7 @@ shoot 09-capabilities -AsBuiltScreen capabilities
 SHOT_DELAY=8 shoot 10-mesh-3d -AsBuiltScreen mesh
 shoot 11-mesh-files -AsBuiltScreen mesh-files
 SHOT_DELAY=10 shoot 12-mesh-quicklook -AsBuiltScreen mesh-quicklook
-# Build 6: Detail scan (TSDF fusion demo), Measure list, Capture Coach HUD preview + grade card.
+# Build 6+: Detail scan (object scan demo since build 10), Measure list, Capture Coach HUD preview + grade card.
 SHOT_DELAY=10 shoot 13-detail-3d -AsBuiltScreen detail
 shoot 14-measurements -AsBuiltScreen measurements
 shoot 15-coach-hud -AsBuiltScreen coach
@@ -51,6 +51,9 @@ shoot 19-coach-grade -AsBuiltScreen coach-grade
 shoot 20-mac-build -AsBuiltScreen mac-build
 shoot 21-mac-build-upload -AsBuiltScreen mac-build-upload
 shoot 22-mac-build-done -AsBuiltScreen mac-build-done
+# Build 10: Detail scan is an object scan: box placement on synthetic depth, object files.
+SHOT_DELAY=8 shoot 23-detail-place -AsBuiltScreen detail-place
+shoot 24-detail-files -AsBuiltScreen detail-files
 
 # Copy the files the app generated for the demo job, as proof that exports work in the Simulator.
 DATA=$(xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data)

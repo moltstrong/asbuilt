@@ -88,8 +88,9 @@ struct CaptureCoachTests {
     }
 
     @Test func hysteresisPreventsFlicker() {
-        // Distance jitters around the 1.0 m limit: the cue changes at most a couple of times.
+        // Distance jitters around the far limit: the cue changes at most a couple of times.
         var coach = CaptureCoach(mode: .detail)
+        let limit = coach.thresholds.maxDistance
         coach.beginScanning()
         var changes = 0
         var gateChanges = 0
@@ -97,8 +98,8 @@ struct CaptureCoachTests {
         var lastGate: Bool?
         var rng = SplitMix64(seed: 42)
         for k in 0..<600 {
-            let jitter = Float(rng.nextUnit() - 0.5) * 0.08 // +-4 cm around 1.0 m
-            let out = coach.update(frame(Double(k) / 30, depth: 1.0 + jitter))
+            let jitter = Float(rng.nextUnit() - 0.5) * 0.08 // +-4 cm around the limit
+            let out = coach.update(frame(Double(k) / 30, depth: limit + jitter))
             if let last, last != out.guidance { changes += 1 }
             if let lastGate, lastGate != out.shouldIntegrate { gateChanges += 1 }
             last = out.guidance

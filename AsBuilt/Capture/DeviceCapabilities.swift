@@ -81,7 +81,7 @@ struct DeviceCapabilities {
     }
 
     var meshScanBlocker: String? {
-        if isSimulator { return "LiDAR Mesh needs a real iPhone or iPad with LiDAR. The Simulator has no depth sensor." }
+        if isSimulator { return "LiDAR scans need a real iPhone or iPad with LiDAR. The Simulator has no depth sensor." }
         if !meshScanSupported { return DeviceCapabilitiesSnapshot.meshMessage }
         if cameraStatus == .denied || cameraStatus == .restricted { return "Camera access is off. Enable it in Settings > AsBuilt." }
         return nil

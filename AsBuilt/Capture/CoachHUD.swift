@@ -70,6 +70,9 @@ final class CoachDriver: ObservableObject {
 
     func dismissFinish() { coach.dismissFinish() }
 
+    /// Object scans: measure coverage around the locked box center (kept until `reset()`).
+    func setOrbitCenter(_ center: SIMD3<Float>) { coach.setOrbitCenter(center) }
+
     func reset() {
         coach.reset()
         output = nil
@@ -145,7 +148,7 @@ enum CoachColors {
         case .good, .complete: return good
         case .nextBand, .gettingReady: return info
         case .lowTexture: return warn
-        case .tooFar, .tooClose: return warn
+        case .tooFar, .tooClose, .aimAtObject: return warn
         default: return bad
         }
     }
@@ -584,8 +587,8 @@ struct CoachIntro: View {
     static func cards(for mode: CoachMode) -> [Card] {
         switch mode {
         case .detail:
-            return [Card(symbol: "lightbulb.max.fill", title: "Bright, even light", color: .yellow),
-                    Card(symbol: "tortoise.fill", title: "Slow, within 1 m", color: CoachColors.good),
+            return [Card(symbol: "cube.transparent", title: "Aim at the object: a box fits around it", color: .yellow),
+                    Card(symbol: "tortoise.fill", title: "Circle it slowly at arm's length", color: CoachColors.good),
                     Card(symbol: "circle.circle", title: "3 heights, all around", color: CoachColors.info)]
         case .mesh:
             return [Card(symbol: "lightbulb.max.fill", title: "Lights on", color: .yellow),

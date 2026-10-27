@@ -10,7 +10,6 @@ import RealityKit
 /// mesh off the main thread and exported as model.usdz, mesh.obj/.mtl, mesh.ply and measurements.csv.
 struct LiDARMeshScanView: View {
     let jobID: UUID
-    var modePicker: AnyView = AnyView(EmptyView())
     var onFinished: (UUID?) -> Void
 
     @EnvironmentObject private var store: JobStore
@@ -110,14 +109,13 @@ struct LiDARMeshScanView: View {
         case .unsupported:
             card {
                 Image(systemName: "point.3.filled.connected.trianglepath.dotted").font(.system(size: 48)).foregroundStyle(Theme.accent)
-                Text("LiDAR Mesh unavailable").font(.title2.bold())
+                Text("Room mesh unavailable").font(.title2.bold())
                 Text(DeviceCapabilitiesSnapshot.meshMessage).multilineTextAlignment(.center)
                 Button("Close") { onFinished(nil); dismiss() }.buttonStyle(BigButtonStyle())
             }
         case .ready:
             VStack(spacing: 10) {
-                modePicker
-                ReadyStartButton(isReady: coach.output?.isReady ?? false, title: "Start scan") {
+                ReadyStartButton(isReady: coach.output?.isReady ?? false, title: "Start room mesh") {
                     coach.begin()
                     model.startScanning()
                 }
@@ -214,7 +212,7 @@ struct LiDARMeshScanView: View {
 
     private func save(_ m: MeshMeasurements) {
         let capture = Capture(id: captureID, kind: .mesh, origin: .lidarMesh, title: titleForExport,
-                              notes: "LiDAR Mesh scan: \(m.dimensionsText(.metric)) (W × D × H), \(m.triangleCount) triangles.",
+                              notes: "Room mesh (LiDAR): \(m.dimensionsText(.metric)) (W × D × H), \(m.triangleCount) triangles.",
                               measurements: m, coachGrade: report?.grade.rawValue, coachFix: report?.fix)
         store.addCapture(capture, to: jobID)
         model.tearDown()

@@ -13,7 +13,7 @@ struct ModelTabView: View {
     @EnvironmentObject private var router: Router
     @AppStorage(Preferences.unitsKey) private var unitsRaw = UnitSystem.imperial.rawValue
     @State private var showingQuickLook = false
-    @State private var showingMeshScan = false
+    @State private var showingDetailScan = false
     @State private var savedMeshID: UUID?
     @State private var didAutoOpen = false
 
@@ -38,7 +38,11 @@ struct ModelTabView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                     RemoteBuildCard(jobID: jobID, capture: capture)
                     if capture.kind == .mesh, let m = store.meshMeasurements(job: jobID, capture: capture.id) {
-                        MeshSummaryView(measurements: m, units: units)
+                        if capture.isDetailScan {
+                            ObjectSummaryView(measurements: m, units: units)
+                        } else {
+                            MeshSummaryView(measurements: m, units: units)
+                        }
                     }
                     Button {
                         showingQuickLook = true
@@ -47,22 +51,33 @@ struct ModelTabView: View {
                     }
                     .buttonStyle(BigButtonStyle())
                     .accessibilityIdentifier("quickLookButton")
-                    Text(capture.kind == .mesh
-                         ? "LiDAR mesh (USDZ, colored by surface type). The Files tab also has OBJ + MTL for Blender/SketchUp/AutoCAD, PLY and measurements.csv."
+                    Text(capture.isDetailScan
+                         ? "LiDAR object scan with its real colors (USDZ). The Files tab also has OBJ + MTL for Blender/SketchUp/AutoCAD, PLY and measurements.csv."
+                         : capture.kind == .mesh
+                         ? "Room mesh (USDZ, colored by surface type). The Files tab also has OBJ + MTL for Blender/SketchUp/AutoCAD, PLY and measurements.csv."
                          : CaptureFile.description(for: url.lastPathComponent))
                         .font(.footnote).foregroundStyle(.secondary)
+                    if capture.isDetailScan {
+                        Label("LiDAR resolves about 2-5 mm within arm's reach: edges are slightly rounded and small text or threads do not show. For the finest surface detail and photo texture, use Capture object (full detail in the cloud).",
+                              systemImage: "info.circle")
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if capture.origin == .sample {
-                        Label(capture.kind == .mesh
-                              ? "Sample LiDAR mesh generated from the demo bedroom. A real LiDAR Mesh scan records the phone's live depth mesh."
+                        Label(capture.isDetailScan
+                              ? "Sample object scan: AsBuilt's real box fit, depth fusion and table removal run on synthetic LiDAR depth of a ball valve."
+                              : capture.kind == .mesh
+                              ? "Sample room mesh generated from the demo bedroom. A real Room mesh records the phone's live depth mesh."
                               : "Sample room: massing model generated from plan data. A real LiDAR scan exports Apple's parametric RoomPlan USDZ.",
                               systemImage: "info.circle")
                             .font(.footnote).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 } else if capture.origin == .sample && store.demoStatus == .preparing {
                     VStack(spacing: 12) {
                         ProgressView()
                         Text("Preparing demo…").font(.headline)
-                        Text(capture.kind == .mesh ? "Building the sample LiDAR mesh." : "Building the 3D model for this sample room.")
+                        Text(capture.isDetailScan ? "Scanning the sample object." : capture.kind == .mesh ? "Building the sample room mesh." : "Building the 3D model for this sample room.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, minHeight: 200)
@@ -84,9 +99,9 @@ struct ModelTabView: View {
                             if capture.status == .imagesOnly || capture.status == .processing || capture.status == .failed {
                                 RetryReconstructionSection(jobID: jobID, capture: capture)
                                 Button {
-                                    showingMeshScan = true
+                                    showingDetailScan = true
                                 } label: {
-                                    Label("Scan it with LiDAR mesh instead", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                                    Label("Scan it with Detail scan instead", systemImage: "cube.transparent")
                                 }
                                 .buttonStyle(BigButtonStyle(filled: false))
                                 .accessibilityIdentifier("meshInsteadButton")
@@ -111,13 +126,13 @@ struct ModelTabView: View {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             showingQuickLook = true
         }
-        .fullScreenCover(isPresented: $showingMeshScan, onDismiss: {
+        .fullScreenCover(isPresented: $showingDetailScan, onDismiss: {
             if let id = savedMeshID {
                 savedMeshID = nil
                 router.path.append(.capture(job: jobID, capture: id, tab: .model))
             }
         }) {
-            MeshScanLauncher(jobID: jobID) { meshID in savedMeshID = meshID }
+            DetailScanLauncher(jobID: jobID) { meshID in savedMeshID = meshID }
                 .environmentObject(store)
         }
     }
@@ -154,6 +169,28 @@ struct MeshSummaryView: View {
                     }
                 }
             }
+        }
+        .card()
+    }
+}
+
+/// Object size (W x D x H from the table) and surface of an object Detail scan.
+struct ObjectSummaryView: View {
+    let measurements: MeshMeasurements
+    let units: UnitSystem
+
+    var body: some View {
+        let m = measurements
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                StatTile(value: UnitFormatter.objectLength(m.width, units), label: "Width", systemImage: "arrow.left.and.right")
+                StatTile(value: UnitFormatter.objectLength(m.depth, units), label: "Depth", systemImage: "arrow.up.left.and.arrow.down.right")
+                StatTile(value: UnitFormatter.objectLength(m.height, units), label: "Height", systemImage: "arrow.up.and.down")
+            }
+            .accessibilityIdentifier("objectDimensions")
+            Text("Object size W × D × H, height from the surface it stands on · \(m.triangleCount.formatted()) triangles · \(UnitFormatter.area(m.surfaceArea, units)) surface")
+                .font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .card()
     }
@@ -257,10 +294,10 @@ struct SceneModelView: UIViewRepresentable {
         let cameraNode = SCNNode()
         cameraNode.camera = camera
         if vertexColorsPLY != nil {
-            // Detail scans are small (tens of cm) and mostly face +Z: frame them from the front.
+            // Object scans (tens of cm, standing on y = 0, long side on X): three-quarter view from above.
             camera.zNear = 0.005
-            let distance = Float(size) * 1.55
-            cameraNode.position = SCNVector3(center.x + distance * 0.25, center.y + distance * 0.18, center.z + distance)
+            let distance = Float(size) * 1.3
+            cameraNode.position = SCNVector3(center.x + distance * 0.45, center.y + distance * 0.62, center.z + distance * 0.80)
         } else {
             let distance = Float(size) * 1.25 + 0.5
             cameraNode.position = SCNVector3(center.x + distance * 0.55, center.y + distance * 0.95, center.z + distance * 0.75)

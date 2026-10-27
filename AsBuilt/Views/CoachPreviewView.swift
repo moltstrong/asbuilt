@@ -3,10 +3,11 @@ import UIKit
 import simd
 import AsBuiltCore
 
-/// Capture Coach HUD driven by synthetic metrics (`CoachDemo`), so the Simulator and CI screenshots
-/// show the real overlay: distance reticle, speed bar, coverage rings, fused-confidence tint and the
-/// grade card. The "camera feed" is the demo Detail scan scene rendered by AsBuiltCore's depth
-/// renderer, and the tint dots come from a real partly fused TSDF volume.
+/// Object Detail scan coach HUD driven by synthetic metrics (`CoachDemo`), so the Simulator and CI
+/// screenshots show the real overlay: distance reticle, speed bar, coverage rings around the locked
+/// object box, fused-confidence tint and the grade card. The "camera feed" is the demo valve on its
+/// table rendered by AsBuiltCore's depth renderer, the box is the real fit, and the tint dots come
+/// from a real partly fused TSDF volume inside it.
 /// Launch with `-AsBuiltScreen coach | coach-fast | coach-far | coach-band | coach-grade`.
 struct CoachPreviewView: View {
     @State var scenario: CoachDemo.Scenario
@@ -16,6 +17,7 @@ struct CoachPreviewView: View {
     @State private var image: UIImage?
     @State private var tint: [CoachPreviewTint] = []
     @State private var stats: TSDFVolume.Stats?
+    @State private var boxSegments: [BoxSegment] = []
     @State private var viewSize: CGSize = .zero
 
     init(scenario: CoachDemo.Scenario) {
@@ -36,6 +38,7 @@ struct CoachPreviewView: View {
                             .frame(width: geo.size.width, height: geo.size.height)
                             .clipped()
                     }
+                    BoxWireframeOverlay(segments: boxSegments, color: CoachColors.good)
                     Canvas { context, size in
                         for p in tint {
                             let pt = CGPoint(x: p.u * size.width, y: p.v * size.height)
@@ -137,15 +140,14 @@ struct CoachPreviewView: View {
     private func load() async {
         let scenario = scenario
         let size = viewSize.width > 0 ? viewSize : CGSize(width: 402, height: 874)
-        let out = await Task.detached(priority: .userInitiated) { () -> (CoachDemo.Result, UIImage?, [CoachPreviewTint], TSDFVolume.Stats) in
-            let result = CoachDemo.run(scenario)
-            let (image, tint, stats) = CoachPreviewRenderer.render(viewSize: size, scenario: scenario)
-            return (result, image, tint, stats)
+        let out = await Task.detached(priority: .userInitiated) { () -> (CoachDemo.Result, CoachPreviewRenderer.Output) in
+            (CoachDemo.run(scenario), CoachPreviewRenderer.render(viewSize: size, scenario: scenario))
         }.value
         result = out.0
-        image = out.1
-        tint = out.2
-        stats = out.3
+        image = out.1.image
+        tint = out.1.tint
+        stats = out.1.stats
+        boxSegments = out.1.box
     }
 }
 
@@ -156,20 +158,43 @@ struct CoachPreviewTint: Hashable, Sendable {
     var confidence: Float
 }
 
-/// Renders the demo scene as a stand-in camera frame plus fused-confidence tint points.
+/// Renders the demo scene as a stand-in camera frame plus fused-confidence tint points and the box.
 enum CoachPreviewRenderer {
-    static func render(viewSize: CGSize, scenario: CoachDemo.Scenario) -> (UIImage?, [CoachPreviewTint], TSDFVolume.Stats) {
-        // Portrait "camera" at the view's aspect ratio, ~66 degrees horizontal FOV.
+    struct Output {
+        var image: UIImage?
+        var tint: [CoachPreviewTint]
+        var stats: TSDFVolume.Stats
+        var box: [BoxSegment]
+    }
+
+    static func render(viewSize: CGSize, scenario: CoachDemo.Scenario) -> Output {
+        let distance: Float = scenario == .tooFar ? 1.35 : 0.5
+        let pose = CoachDemo.orbitPose(azimuth: 18, elevation: 30, distance: distance)
+        let (image, K) = cameraImage(viewSize: viewSize, pose: pose)
+        let box = DemoDetailScan.fitBox()?.box
+        // Real partial fusion: the first views of the orbit -> thin (red) and solid (green) areas.
+        let volume = DemoDetailScan.partialVolume(frames: scenario == .grade ? 18 : 8)
+        var tint: [CoachPreviewTint] = []
+        let worldToCamera = pose.inverse
+        for s in volume.surfaceSamples(solidWeight: 6, maxCount: 2500) {
+            let pc4 = worldToCamera * SIMD4(s.position, 1)
+            guard let uv = K.project(SIMD3(pc4.x, pc4.y, pc4.z)) else { continue }
+            let u = CGFloat(uv.x) / CGFloat(K.width), v = CGFloat(uv.y) / CGFloat(K.height)
+            guard u >= 0, u <= 1, v >= 0, v <= 1 else { continue }
+            tint.append(CoachPreviewTint(u: u, v: v, confidence: s.confidence))
+        }
+        let segments = box.map { BoxWireframeOverlay.segments(box: $0, cameraToWorld: pose, intrinsics: K) } ?? []
+        return Output(image: image, tint: tint, stats: volume.stats, box: segments)
+    }
+
+    /// Portrait "camera" frame of the demo table scene at the view's aspect ratio (~66 degrees
+    /// horizontal FOV): Lambert shading from depth-map normals, a dim room where nothing is hit.
+    static func cameraImage(viewSize: CGSize, pose: simd_float4x4) -> (UIImage?, PinholeIntrinsics) {
         let w = 300
         let h = max(200, Int((Double(w) * Double(viewSize.height / max(1, viewSize.width))).rounded()))
         let fx = Float(w) / (2 * tan(33 * Float.pi / 180))
         let K = PinholeIntrinsics(fx: fx, fy: fx, cx: Float(w) / 2, cy: Float(h) / 2, width: w, height: h)
-        let distance: Float = scenario == .tooFar ? 1.35 : 0.5
-        let pose = CoachDemo.orbitPose(azimuth: 18, elevation: 12, distance: distance)
-        let scene = DemoDetailScan.scene()
-        let frame = scene.render(intrinsics: K, cameraToWorld: pose, maxDistance: 3, withColor: true)
-
-        // Lambert shading from depth-map normals + a dim room behind the board.
+        let frame = DemoDetailScan.scene().render(intrinsics: K, cameraToWorld: pose, maxDistance: 4, withColor: true)
         var rgba = [UInt8](repeating: 255, count: w * h * 4)
         let light = simd_normalize(SIMD3<Float>(0.4, 0.7, 0.6))
         for j in 0..<h {
@@ -195,6 +220,8 @@ enum CoachPreviewRenderer {
                         shade = 0.45 + 0.55 * max(0, simd_dot(n, light))
                     }
                 }
+                // A little darker with distance, like a real room behind the table.
+                shade *= max(0.55, 1 - 0.25 * max(0, d - 0.5))
                 for c in 0..<3 {
                     rgba[o + c] = UInt8(max(0, min(255, Float(frame.rgb[k * 3 + c]) * shade)))
                 }
@@ -207,18 +234,109 @@ enum CoachPreviewRenderer {
                   let cg = ctx.makeImage() else { return nil }
             return UIImage(cgImage: cg)
         }
+        return (image, K)
+    }
+}
 
-        // Real partial fusion: the first two passes' frames -> thin (red) and solid (green) areas.
-        let volume = DemoDetailScan.partialVolume(frames: scenario == .grade ? 18 : 8)
-        var tint: [CoachPreviewTint] = []
-        let worldToCamera = pose.inverse
-        for s in volume.surfaceSamples(solidWeight: 6, maxCount: 2500) {
-            let pc4 = worldToCamera * SIMD4(s.position, 1)
-            guard let uv = K.project(SIMD3(pc4.x, pc4.y, pc4.z)) else { continue }
-            let u = CGFloat(uv.x) / CGFloat(w), v = CGFloat(uv.y) / CGFloat(h)
-            guard u >= 0, u <= 1, v >= 0, v <= 1 else { continue }
-            tint.append(CoachPreviewTint(u: u, v: v, confidence: s.confidence))
+/// Object Detail scan placement step with synthetic depth (`-AsBuiltScreen detail-place`): the demo
+/// valve on its table, the box from the real `ObjectBoxFitter`, the real coach pre-flight, and the
+/// same placement panel as the AR screen (+/- resize the box live).
+struct ObjectPlacePreviewView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var router: Router
+    @AppStorage(Preferences.unitsKey) private var unitsRaw = UnitSystem.imperial.rawValue
+    @State private var image: UIImage?
+    @State private var intrinsics: PinholeIntrinsics?
+    @State private var fitted: ObjectBoxFitter.Result?
+    @State private var box: ObjectBox?
+    @State private var status: ObjectPlacementPanel.Status = .searching
+    @State private var output: CoachOutput?
+    @State private var viewSize: CGSize = .zero
+
+    private let pose = DemoDetailScan.placementPose
+    private var units: UnitSystem { UnitSystem(rawValue: unitsRaw) ?? .imperial }
+
+    var body: some View {
+        // Same layering as the AR screen: camera + box full-bleed, HUD inside the safe area.
+        ZStack {
+            GeometryReader { geo in
+                ZStack {
+                    Color.black
+                    if let image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .clipped()
+                    }
+                    if let box, let intrinsics {
+                        BoxWireframeOverlay(segments: BoxWireframeOverlay.segments(box: box, cameraToWorld: pose, intrinsics: intrinsics))
+                    }
+                }
+                .onAppear { viewSize = geo.size }
+            }
+            .ignoresSafeArea()
+            if let output {
+                CoachOverlay(output: output, thresholds: .for(.detail), showsSpeed: false, showsRings: false, isScanning: false)
+            }
+            VStack(spacing: 12) {
+                HStack(alignment: .top) {
+                    Button("Cancel") { dismiss() }
+                        .buttonStyle(BigButtonStyle(filled: false, color: .white))
+                        .frame(width: 110)
+                        .accessibilityIdentifier("placePreviewClose")
+                    Spacer()
+                    Text("PREVIEW · synthetic depth, real box fit")
+                        .font(.caption2.weight(.heavy))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(.black.opacity(0.45), in: Capsule())
+                        .padding(.top, 14)
+                    Spacer()
+                    CoachHelpButton {}
+                }
+                Spacer()
+                ObjectPlacementPanel(box: box, status: status, units: units, isReady: output?.isReady ?? false,
+                                     onAdjust: { axis, delta in
+                                         guard let b = box else { return }
+                                         box = b.resized(axis: axis, by: delta)
+                                         status = .adjusted
+                                     },
+                                     onFitAgain: {
+                                         box = fitted?.box
+                                         status = .fitted(onPlane: fitted?.planeY != nil)
+                                     },
+                                     onStart: { router.path.append(.coachPreview(CoachDemo.Scenario.midScan.rawValue)) })
+            }
+            .padding()
         }
-        return (image, tint, volume.stats)
+        .toolbar(.hidden, for: .navigationBar)
+        .statusBarHidden()
+        .task { await load() }
+    }
+
+    private func load() async {
+        let size = viewSize.width > 0 ? viewSize : CGSize(width: 402, height: 874)
+        let pose = pose
+        let out = await Task.detached(priority: .userInitiated) { () -> (UIImage?, PinholeIntrinsics, ObjectBoxFitter.Result?, CoachOutput?) in
+            let (image, K) = CoachPreviewRenderer.cameraImage(viewSize: size, pose: pose)
+            let fit = DemoDetailScan.fitBox()
+            // Coach pre-flight: one steady second at the placement pose, distance measured to the box.
+            var coach = CaptureCoach(mode: .detail)
+            var last: CoachOutput?
+            for k in 0..<40 {
+                var frame = CoachFrame(timestamp: Double(k) / 30, cameraToWorld: pose, ambientIntensity: 900, centerDepth: 0.5,
+                                       highConfidenceFraction: 0.8, tracking: .normal, featureCount: 300)
+                if let box = fit?.box { frame = ObjectScan.coachFrame(frame, box: box) }
+                last = coach.update(frame)
+            }
+            return (image, K, fit, last)
+        }.value
+        image = out.0
+        intrinsics = out.1
+        fitted = out.2
+        box = out.2?.box
+        status = out.2.map { .fitted(onPlane: $0.planeY != nil) } ?? .searching
+        output = out.3
     }
 }

@@ -26,8 +26,8 @@ enum ExportService {
             case .roomPlan: source = "LiDAR scan (Apple RoomPlan)"
             case .objectCapture: source = "Object Capture"
             case .sample: source = "Sample data"
-            case .lidarMesh: source = "LiDAR Mesh scan (ARKit)"
-            case .detailScan: source = "Detail scan (LiDAR depth fusion)"
+            case .lidarMesh: source = "Room mesh (ARKit LiDAR)"
+            case .detailScan: source = "Object Detail scan (LiDAR depth fusion)"
             case .unknown: source = "AsBuilt"
             }
             self.init(jobName: job.name, address: job.address, client: job.client, roomTitle: capture.title,
@@ -136,18 +136,47 @@ enum ExportService {
         return output.measurements
     }
 
-    /// Demo Detail scan: runs the real TSDF fusion on synthetic depth maps of a small electrical box +
-    /// conduit + ball valve, then writes the colored exports.
+    /// Object Detail scan deliverables (same files as `writeFusedScan`) from a cleaned object mesh:
+    /// turned square to the axes, the table (`planeY`) at y = 0, W x D x H measured from the table.
+    @discardableResult
+    static func writeObjectScan(_ mesh: FusedMesh, planeY: Float?, to dir: URL, title: String, units: UnitSystem,
+                                coachReport: String? = nil, progress: ((Double) -> Void)? = nil) throws -> MeshMeasurements {
+        let prepared = ObjectScan.prepareForExport(mesh, planeY: planeY)
+        guard prepared.mesh.triangleCount > 0 else {
+            throw NSError(domain: "AsBuilt.DetailScan", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Nothing was scanned inside the box. Make the box hug the object, stay within arm's length and circle it slowly."])
+        }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let output = LiDARMeshExporter.export(prepared, title: title, units: units, object: true, progress: progress)
+        for file in output.files {
+            try file.data.write(to: dir.appendingPathComponent(file.name), options: .atomic)
+        }
+        if let coachReport {
+            try? Data(coachReport.utf8).write(to: dir.appendingPathComponent(CaptureFile.coachReport), options: .atomic)
+        }
+        return output.measurements
+    }
+
+    /// Demo object Detail scan: the real pipeline (box fit, fusion inside the box, crop, table removal)
+    /// on synthetic LiDAR depth of a ball valve on a table, then the colored exports.
     @discardableResult
     static func writeDemoDetailScan(to dir: URL, title: String, units: UnitSystem) throws -> MeshMeasurements {
-        let fused = DemoDetailScan.fuse()
+        guard let result = DemoDetailScan.fuse() else {
+            throw NSError(domain: "AsBuilt.DetailScan", code: 3, userInfo: [NSLocalizedDescriptionKey: "The demo box fit failed."])
+        }
+        let box = result.fit.box
+        let truth = DemoDetailScan.trueSize
+        func mm(_ v: Float) -> String { String(format: "%.1f", v * 1000) }
+        let measured = ObjectScan.prepareForExport(result.mesh, planeY: result.fit.planeY).measurements
         let report = """
-        AsBuilt Capture Coach: demo Detail scan
-        Fused \(fused.stats.framesIntegrated) synthetic LiDAR depth frames (256 x 192) at 4 mm voxels.
-        Blocks: \(fused.stats.blockCount), voxels: \(fused.stats.voxelCount), memory: \(fused.stats.memoryBytes / 1024) KB.
-        Mesh: \(fused.mesh.vertexCount) vertices, \(fused.mesh.triangleCount) triangles.
+        AsBuilt Capture Coach: demo object Detail scan (synthetic LiDAR depth, real pipeline)
+        Box fit from one view: \(mm(box.size.x)) x \(mm(box.size.z)) x \(mm(box.size.y)) mm (W x D x H), on the table at y = \(String(format: "%.3f", result.fit.planeY ?? .nan)) m.
+        Fused \(result.stats.framesIntegrated) depth frames (256 x 192, 1.5 mm noise) at \(mm(result.configuration.voxelSize)) mm voxels inside the box + \(mm(result.margin)) mm.
+        Blocks: \(result.stats.blockCount), memory: \(result.stats.memoryBytes / 1024) KB (\(String(format: "%.1f", result.stats.memoryFraction * 100)) % of the cap).
+        Cleanup: \(result.cleanup.croppedOut) triangles outside the box, \(result.cleanup.planeRemoved) table triangles, \(result.cleanup.componentsDropped) loose pieces dropped.
+        Object: \(result.mesh.triangleCount) triangles. Measured \(String(format: "%.1f x %.1f x %.1f", measured.width * 1000, measured.depth * 1000, measured.height * 1000)) mm vs true \(mm(truth.x)) x \(mm(truth.y)) x \(mm(truth.z)) mm.
         """
-        return try writeFusedScan(fused.mesh, to: dir, title: title, units: units, coachReport: report)
+        return try writeObjectScan(result.mesh, planeY: result.fit.planeY, to: dir, title: title, units: units, coachReport: report)
     }
 
     /// Object Capture photos (+ reconstruction log) as a STORE zip in the temporary directory,

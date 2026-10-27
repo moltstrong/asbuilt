@@ -32,13 +32,13 @@ struct CapabilitiesView: View {
                         row("On-device 3D reconstruction", ok: caps.onDeviceReconstruction,
                             detail: caps.onDeviceReconstruction ? "model.usdz is built on the phone (with automatic retries)" : "Photos are kept; the cloud builds the model")
                         Divider()
-                        row("LiDAR Mesh scan", ok: caps.meshScanSupported,
-                            detail: caps.meshScanBlocker ?? (caps.meshClassification
-                                ? "Ready: live 3D mesh of any space or object, classified walls/floor/doors. No photogrammetry."
-                                : "Ready: live 3D mesh of any space or object. No photogrammetry."))
+                        row("Detail scan (objects)", ok: caps.meshScanSupported,
+                            detail: caps.meshScanBlocker ?? "Ready: box an object, LiDAR fusion inside the box (2-4 mm voxels), colored model with W × D × H")
                         Divider()
-                        row("Detail scan (depth fusion)", ok: caps.meshScanSupported,
-                            detail: caps.meshScanBlocker ?? "Ready: 4 mm voxels within 1.5 m, colored mesh")
+                        row("Room mesh", ok: caps.meshScanSupported,
+                            detail: caps.meshScanBlocker ?? (caps.meshClassification
+                                ? "Ready: live 3D mesh of rooms and spaces, classified walls/floor/doors. No photogrammetry."
+                                : "Ready: live 3D mesh of rooms and spaces. No photogrammetry."))
                         Divider()
                         row("Measure", ok: caps.meshScanSupported,
                             detail: caps.meshScanBlocker ?? "Ready: point-to-point LiDAR measuring, tape calibration")
@@ -117,12 +117,12 @@ struct ResolutionGuide: View {
     static let modes: [Mode] = [
         Mode(name: "Room (RoomPlan)", icon: "square.split.bottomrightquarter", resolves: "about 1-2 cm",
              detail: "Walls, doors, windows, openings and major fixtures as clean shapes. Not small details."),
-        Mode(name: "LiDAR Mesh", icon: "cube.transparent", resolves: "a few cm",
+        Mode(name: "Detail scan (object)", icon: "cube.transparent.fill", resolves: "about 2-5 mm at arm's length",
+             detail: "Boxes the object on the table and fuses LiDAR depth inside the box (2 mm voxels up to 30 cm, 3 mm up to 60 cm, else 4 mm). The LiDAR sensor sets the limit: edges round off by a few mm and fine texture, threads or labels do not show. Model in seconds, no upload."),
+        Mode(name: "Capture object (photos)", icon: "camera.aperture", resolves: "finest: full detail in the cloud",
+             detail: "Photos rebuilt in the cloud at full detail (250k triangles, 8K photo texture), sized with LiDAR. The best surface detail; takes about 20 minutes."),
+        Mode(name: "Room mesh", icon: "point.3.filled.connected.trianglepath.dotted", resolves: "a few cm",
              detail: "ARKit's live mesh: triangles of a few cm. Fast for whole spaces."),
-        Mode(name: "Detail scan", icon: "viewfinder", resolves: "about 3-5 mm within 1 m",
-             detail: "Fuses many LiDAR depth frames into 4 mm voxels. Fine shapes appear after several passes; absolute accuracy is still about 1 cm."),
-        Mode(name: "Object Capture", icon: "cube", resolves: "phone: reduced detail",
-             detail: "On-phone builds use Apple's reduced detail. The cloud then rebuilds every object scan at full detail (250k triangles, 8K texture) and sends it back."),
         Mode(name: "Measure", icon: "ruler", resolves: "about ±1 cm, better after tape calibration",
              detail: "Each point is the median of about 20 depth samples; the ± comes from their spread."),
     ]
@@ -130,7 +130,7 @@ struct ResolutionGuide: View {
     static let tips: [(String, String)] = [
         ("sun.max.fill", "Even, bright light (the torch turns on by itself when it is dark)"),
         ("tortoise.fill", "Move slowly: keep the speed bar green"),
-        ("arrow.down.right.and.arrow.up.left", "Stay within about 1 m for detail"),
+        ("arrow.down.right.and.arrow.up.left", "Objects: stay at arm's length (25-80 cm)"),
         ("circle.dashed", "3 passes: low, middle, high"),
         ("sparkles", "Shiny or plain surfaces: matte spray or painter's tape"),
     ]

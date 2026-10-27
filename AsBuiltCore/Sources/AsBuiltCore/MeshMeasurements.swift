@@ -52,11 +52,28 @@ public struct MeshMeasurements: Codable, Hashable, Sendable {
         [width, depth, height].map { UnitFormatter.length($0, units) }.joined(separator: " × ")
     }
 
-    /// Measures `mesh` as is (no re-orientation): axis-aligned box of the used vertices.
-    public static func measure(_ mesh: ClassifiedMesh, alignmentYawDegrees: Double = 0) -> MeshMeasurements {
+    /// Measures `mesh` as is (no re-orientation): axis-aligned box of the used vertices. With `baseY`
+    /// (object scans: the table top the object stands on) the height runs from there to the top.
+    /// `trim` > 0 (object scans) ignores that fraction of the most extreme vertices on each side, so a
+    /// stray vertex a voxel outside a face does not set the size.
+    public static func measure(_ mesh: ClassifiedMesh, alignmentYawDegrees: Double = 0, baseY: Float? = nil,
+                               trim: Double = 0) -> MeshMeasurements {
         let b = mesh.bounds
-        let size = b.map { SIMD3<Double>(Double($0.max.x - $0.min.x), Double($0.max.y - $0.min.y), Double($0.max.z - $0.min.z)) }
+        var size = b.map { SIMD3<Double>(Double($0.max.x - $0.min.x), Double($0.max.y - $0.min.y), Double($0.max.z - $0.min.z)) }
             ?? SIMD3<Double>(0, 0, 0)
+        var top = b?.max.y ?? 0
+        if trim > 0, mesh.positions.count >= 20 {
+            let f = min(0.05, trim)
+            func extent(_ k: Int) -> (Float, Float) {
+                let v = mesh.positions.map { $0[k] }.sorted()
+                let n = v.count - 1
+                return (v[Int((Double(n) * f).rounded())], v[Int((Double(n) * (1 - f)).rounded())])
+            }
+            let x = extent(0), y = extent(1), z = extent(2)
+            size = SIMD3(Double(x.1 - x.0), Double(y.1 - y.0), Double(z.1 - z.0))
+            top = y.1
+        }
+        if let baseY, b != nil { size.y = Double(max(0, top - baseY)) }
         var stats: [ClassStat] = []
         var total = 0.0
         for group in mesh.groups {
@@ -95,13 +112,18 @@ public enum MeshNormalizer {
         public var yawRadians: Double
     }
 
-    public static func prepareForExport(_ input: ClassifiedMesh) -> Result {
+    /// `baseY` (object scans): world height of the surface the object stands on. The export then puts
+    /// that surface (not the lowest vertex, which sits a voxel or two above it after the table is
+    /// removed) at y = 0 and measures the height from it.
+    public static func prepareForExport(_ input: ClassifiedMesh, baseY: Float? = nil, trim: Double = 0) -> Result {
+        // Objects are small: find their footprint direction on a 1 mm grid instead of 5 mm.
+        let quantum = baseY == nil ? 0.005 : 0.001
         let mesh = removingUnusedVertices(input)
         guard mesh.triangleCount > 0 else {
             return Result(mesh: mesh, measurements: .measure(mesh), yawRadians: 0)
         }
         let footprint = mesh.positions.map { Point2D(Double($0.x), Double($0.z)) }
-        let yaw = alignmentYaw(footprint)
+        let yaw = alignmentYaw(footprint, quantum: quantum)
         let c = Float(cos(yaw))
         let s = Float(sin(yaw))
         // Rotation about +Y by `yaw`: x' = c x + s z, z' = -s x + c z.
@@ -113,12 +135,15 @@ public enum MeshNormalizer {
             lo = pointwiseMin(lo, p)
             hi = pointwiseMax(hi, p)
         }
-        let shift = SIMD3<Float>((lo.x + hi.x) / 2, lo.y, (lo.z + hi.z) / 2)
+        // The surface must be where the object's base is (within 2 cm); otherwise measure from the mesh.
+        let base = baseY.flatMap { $0.isFinite && abs($0 - lo.y) <= 0.02 ? $0 : nil }
+        let shift = SIMD3<Float>((lo.x + hi.x) / 2, base ?? lo.y, (lo.z + hi.z) / 2)
         for i in positions.indices { positions[i] -= shift }
         let out = ClassifiedMesh(positions: positions, normals: normals, groups: mesh.groups, colors: mesh.colors)
         var degrees = yaw * 180 / .pi
         if abs(degrees) < 1e-9 { degrees = 0 }
-        return Result(mesh: out, measurements: .measure(out, alignmentYawDegrees: degrees), yawRadians: yaw)
+        return Result(mesh: out, measurements: .measure(out, alignmentYawDegrees: degrees, baseY: base == nil ? nil : 0, trim: trim),
+                      yawRadians: yaw)
     }
 
     /// Keeps only vertices referenced by a face (in first-use order) and re-indexes the groups.
@@ -153,12 +178,13 @@ public enum MeshNormalizer {
 
     /// Yaw (radians, about +Y) that turns the minimum-area bounding rectangle of the XZ footprint so
     /// its longer side runs along +X. Rotating calipers over the convex hull.
-    public static func alignmentYaw(_ points: [Point2D]) -> Double {
-        // Quantize to 5 mm and dedupe first: big scans have ~10^5 vertices.
+    public static func alignmentYaw(_ points: [Point2D], quantum: Double = 0.005) -> Double {
+        // Quantize (5 mm by default) and dedupe first: big scans have ~10^5 vertices.
+        let q = max(1e-5, quantum)
         var seen = Set<Point2D>()
         seen.reserveCapacity(points.count / 4)
         for p in points where p.x.isFinite && p.y.isFinite {
-            seen.insert(Point2D((p.x * 200).rounded() / 200, (p.y * 200).rounded() / 200))
+            seen.insert(Point2D((p.x / q).rounded() * q, (p.y / q).rounded() * q))
         }
         let hull = Polygon2D.convexHull(Array(seen))
         guard hull.count >= 3 else { return 0 }
@@ -199,19 +225,25 @@ public enum MeshNormalizer {
 
 /// measurements.csv for a LiDAR mesh scan.
 public enum MeshMeasurementsCSV {
-    public static func write(_ m: MeshMeasurements, title: String, units: UnitSystem) -> String {
-        let lengthUnit = units == .imperial ? "ft" : "m"
+    /// `object`: an object Detail scan: lengths in inches (imperial) or millimeters (metric), sizes
+    /// measured from the surface the object stands on.
+    public static func write(_ m: MeshMeasurements, title: String, units: UnitSystem, object: Bool = false) -> String {
+        let lengthUnit = object ? (units == .imperial ? "in" : "mm") : (units == .imperial ? "ft" : "m")
         let areaUnit = units == .imperial ? "sq ft" : "m²"
-        func len(_ v: Double) -> String { UnitFormatter.decimal(UnitFormatter.lengthValue(v, units), units == .imperial ? 2 : 3) }
+        func len(_ v: Double) -> String {
+            if object { return units == .imperial ? UnitFormatter.decimal(v / UnitFormatter.metersPerInch, 2) : UnitFormatter.decimal(v * 1000, 1) }
+            return UnitFormatter.decimal(UnitFormatter.lengthValue(v, units), units == .imperial ? 2 : 3)
+        }
+        func display(_ v: Double) -> String { object ? UnitFormatter.objectLength(v, units) : UnitFormatter.length(v, units) }
         func area(_ v: Double) -> String { UnitFormatter.decimal(UnitFormatter.areaValue(v, units), 2) }
         var rows: [[String]] = [["Measurement", "Value", "Unit", "Display", "Metric value", "Metric unit"]]
         rows.append(["Scan", title, "", "", "", ""])
-        rows.append(["Width (X, longest side)", len(m.width), lengthUnit, UnitFormatter.length(m.width, units),
-                     UnitFormatter.decimal(m.width, 3), "m"])
-        rows.append(["Depth (Z)", len(m.depth), lengthUnit, UnitFormatter.length(m.depth, units),
-                     UnitFormatter.decimal(m.depth, 3), "m"])
-        rows.append(["Height (Y)", len(m.height), lengthUnit, UnitFormatter.length(m.height, units),
-                     UnitFormatter.decimal(m.height, 3), "m"])
+        rows.append(["Width (X, longest side)", len(m.width), lengthUnit, display(m.width),
+                     UnitFormatter.decimal(m.width, object ? 4 : 3), "m"])
+        rows.append(["Depth (Z)", len(m.depth), lengthUnit, display(m.depth),
+                     UnitFormatter.decimal(m.depth, object ? 4 : 3), "m"])
+        rows.append([object ? "Height (Y, from the surface it stands on)" : "Height (Y)", len(m.height), lengthUnit, display(m.height),
+                     UnitFormatter.decimal(m.height, object ? 4 : 3), "m"])
         rows.append(["Bounding box footprint", area(m.width * m.depth), areaUnit, UnitFormatter.area(m.width * m.depth, units),
                      UnitFormatter.decimal(m.width * m.depth, 3), "m²"])
         rows.append(["Scanned surface area (all)", area(m.surfaceArea), areaUnit, UnitFormatter.area(m.surfaceArea, units),
@@ -229,7 +261,9 @@ public enum MeshMeasurementsCSV {
             rows.append(["Triangles: \(cls.name)", "\(t)", "count", "\(t)", "\(t)", "count"])
         }
         rows.append(["Alignment yaw", UnitFormatter.decimal(m.alignmentYawDegrees, 2), "deg", "", "", ""])
-        rows.append(["Note", "LiDAR mesh bounding box (gravity up). Areas are scanned surface, not net finished area. Verify on site.",
+        rows.append(["Note", object
+                     ? "Object Detail scan: LiDAR depth fused inside a fitted box, table removed. Size is the object's box turned square to its footprint (gravity up), ignoring the 0.1 % most extreme surface points. LiDAR resolves about 2-5 mm; verify critical dimensions with a tape."
+                     : "LiDAR mesh bounding box (gravity up). Areas are scanned surface, not net finished area. Verify on site.",
                      "", "", "", ""])
         return rows.map { $0.map(CSVWriter.escape).joined(separator: ",") }.joined(separator: "\r\n") + "\r\n"
     }

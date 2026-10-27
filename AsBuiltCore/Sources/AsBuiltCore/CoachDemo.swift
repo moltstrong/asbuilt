@@ -27,12 +27,14 @@ public enum CoachDemo {
         public var integratedFrames: Int
     }
 
-    /// The scan target (the demo Detail scan board).
-    public static let target = SIMD3<Float>(0.0, 0.17, -0.07)
+    /// The scan target: the demo valve's fitted box center (falls back to the valve's middle).
+    public static let target: SIMD3<Float> = DemoDetailScan.fitBox()?.box.center ?? DemoDetailScan.target
 
     /// Runs `scenario` at 30 fps and returns the final output.
     public static func run(_ scenario: Scenario) -> Result {
         var coach = CaptureCoach(mode: .detail)
+        // Object scan: coverage is measured around the fitted box, like the app after Start.
+        coach.setOrbitCenter(target)
         let fps = 30.0
         var t = 0.0
         var lastOutput: CoachOutput?
@@ -113,17 +115,14 @@ public enum CoachDemo {
 }
 
 extension DemoDetailScan {
-    /// A partly fused demo volume (the first `frames` of the 3-band orbit), for the coverage-tint preview.
-    public static func partialVolume(frames: Int, perBand: Int = 6, voxelSize: Float = 0.004) -> TSDFVolume {
-        var config = TSDFVolume.Configuration.detail
-        config.voxelSize = voxelSize
-        let volume = TSDFVolume(configuration: config)
-        let scene = scene()
-        let K = depthIntrinsics
+    /// A partly fused demo volume (the first `frames` views of the orbit, inside the fitted box), for
+    /// the coverage-tint preview.
+    public static func partialVolume(frames: Int, perBand: Int = 6) -> TSDFVolume {
+        guard let fit = fitBox() else { return TSDFVolume(configuration: .detail) }
+        let setup = fusionSetup(fit)
+        let volume = TSDFVolume(configuration: setup.configuration)
         for (k, pose) in poses(perBand: perBand).prefix(max(0, frames)).enumerated() {
-            let frame = scene.render(intrinsics: K, cameraToWorld: pose, maxDistance: 1.2, noise: 0.0015, seed: UInt64(k + 1))
-            volume.integrate(DepthFrame(width: K.width, height: K.height, depth: frame.depth, intrinsics: K, cameraToWorld: pose),
-                             bounds: bounds)
+            volume.integrate(frame(pose: pose, seed: UInt64(k + 1), withColor: false), bounds: setup.bounds)
         }
         return volume
     }

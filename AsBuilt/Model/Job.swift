@@ -11,7 +11,7 @@ enum CaptureKind: String, Codable, CaseIterable, Hashable, Sendable {
         switch self {
         case .room: return "Room scan"
         case .object: return "Object capture"
-        case .mesh: return "LiDAR Mesh scan"
+        case .mesh: return "Room mesh"
         }
     }
 
@@ -39,8 +39,9 @@ enum CaptureOrigin: String, Codable, Hashable, Sendable {
     case sample
     /// ARKit scene reconstruction (LiDAR Mesh scan). Added in build 5.
     case lidarMesh
-    /// TSDF fusion of LiDAR depth maps (Detail scan, 4 mm voxels). Added in build 6; older builds
-    /// decode it as `.unknown` and still show the mesh files.
+    /// TSDF fusion of LiDAR depth maps (Detail scan). Added in build 6 (4 mm, everything within
+    /// 1.5 m); since build 10 an object scan inside a fitted box (2-4 mm). Older builds decode it as
+    /// `.unknown` and still show the mesh files.
     case detailScan
     /// Origin written by a newer build.
     case unknown
@@ -190,6 +191,12 @@ struct Job: Codable, Identifiable, Hashable, Sendable {
     var roomCaptures: [Capture] { captures.filter { $0.kind == .room } }
     var objectCaptures: [Capture] { captures.filter { $0.kind == .object } }
     var meshCaptures: [Capture] { captures.filter { $0.kind == .mesh } }
+    /// Object Detail scans (LiDAR fusion; stored as mesh captures so older builds still open them).
+    var detailScanCaptures: [Capture] { meshCaptures.filter(\.isDetailScan) }
+    /// Room meshes (ARKit scene reconstruction).
+    var roomMeshCaptures: [Capture] { meshCaptures.filter { !$0.isDetailScan } }
+    /// Everything on the job screen's Objects list: Detail scans and photo captures, oldest first.
+    var allObjectCaptures: [Capture] { (detailScanCaptures + objectCaptures).sorted { $0.createdAt < $1.createdAt } }
 }
 
 /// Well-known file names inside `Documents/Jobs/<jobId>/<captureId>/`.

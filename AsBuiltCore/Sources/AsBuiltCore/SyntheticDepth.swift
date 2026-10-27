@@ -12,6 +12,8 @@ public struct AnalyticScene: Sendable {
         case sphere(center: SIMD3<Float>, radius: Float)
         /// Axis-aligned box.
         case box(center: SIMD3<Float>, halfExtents: SIMD3<Float>)
+        /// Box turned about +Y by `yaw` radians (`ObjectBox` convention).
+        case orientedBox(center: SIMD3<Float>, halfExtents: SIMD3<Float>, yaw: Float)
         /// Capped cylinder between two points.
         case cylinder(a: SIMD3<Float>, b: SIMD3<Float>, radius: Float)
         /// Infinite plane through `point` with unit `normal` (solid behind it).
@@ -43,6 +45,8 @@ public struct AnalyticScene: Sendable {
             let q = abs(p - c) - e
             let outside = simd_length(simd_max(q, SIMD3(repeating: 0)))
             return outside + min(max(q.x, max(q.y, q.z)), 0)
+        case let .orientedBox(c, e, yaw):
+            return distance(.box(center: .zero, halfExtents: e), ObjectBox(center: c, halfExtents: e, yaw: yaw).local(p))
         case let .cylinder(a, b, r):
             let axisVector = b - a
             let height = simd_length(axisVector)
@@ -62,6 +66,7 @@ public struct AnalyticScene: Sendable {
         switch shape {
         case let .sphere(c, r): return SIMD4(c, r)
         case let .box(c, e): return SIMD4(c, simd_length(e) * 1.001)
+        case let .orientedBox(c, e, _): return SIMD4(c, simd_length(e) * 1.001)
         case let .cylinder(a, b, r):
             let half = simd_length(b - a) / 2
             return SIMD4((a + b) / 2, (half * half + r * r).squareRoot() * 1.001)
@@ -109,6 +114,13 @@ public struct AnalyticScene: Sendable {
             }
             if tNear > tMin { return tNear }
             return tFar > tMin ? tFar : .infinity
+        case let .orientedBox(c, e, yaw):
+            // Into box coordinates (rotation about +Y), then the axis-aligned slab test.
+            let cs = cos(yaw), sn = sin(yaw)
+            let lx = ox - c.x, lz = oz - c.z
+            return intersect(.box(center: .zero, halfExtents: e),
+                             ox: cs * lx + sn * lz, oy: oy - c.y, oz: -sn * lx + cs * lz,
+                             dx: cs * dx + sn * dz, dy: dy, dz: -sn * dx + cs * dz, tMin: tMin)
         case let .cylinder(a, b, r):
             let axx = b.x - a.x, axy = b.y - a.y, axz = b.z - a.z
             let height = (axx * axx + axy * axy + axz * axz).squareRoot()
@@ -266,71 +278,120 @@ public struct SplitMix64: Sendable {
     }
 }
 
-/// The demo job's "Detail scan": a utility corner on a plywood backboard (a 4" square electrical box
-/// with a conduit, and a copper supply line with a ball valve), rendered into 256x192 LiDAR-like depth
-/// maps from 3 height bands around the front and actually fused with `TSDFVolume` at 4 mm.
+/// The demo job's object Detail scan: a 3/4" brass ball valve with copper pipe stubs and a red lever,
+/// lying on a tabletop next to a coffee mug and a tape measure (clutter), with the floor below.
+/// Rendered into 256x192 LiDAR-like depth maps and run through the real object pipeline: box fit
+/// from one placement view, TSDF fusion inside the box at the box's voxel size, then crop, table
+/// removal and component cleanup.
 public enum DemoDetailScan {
     public static let depthIntrinsics = PinholeIntrinsics(fx: 1450, fy: 1450, cx: 960, cy: 720, width: 1920, height: 1440)
         .scaled(toWidth: 256, height: 192)
 
-    public static func scene() -> AnalyticScene {
-        let inch: Float = 0.0254
-        let plywood = SIMD3<UInt8>(196, 160, 110)
-        let steel = SIMD3<UInt8>(150, 156, 162)
-        let conduit = SIMD3<UInt8>(185, 190, 195)
-        let copper = SIMD3<UInt8>(184, 104, 58)
+    /// Table top height (m) and the valve's yaw on it.
+    public static let tableTopY: Float = 0.75
+    public static let yaw: Float = 20 * .pi / 180
+    /// True size of the valve, W (pipe end to pipe end) x D (ball housing) x H (table to lever top).
+    public static let trueSize = SIMD3<Float>(0.250, 0.080, 0.105)
+    /// Middle of the valve (orbit target).
+    public static let target = SIMD3<Float>(0, tableTopY + 0.05, 0)
+
+    /// Point on the valve's local frame (x along the pipe, y up from the table top, z across).
+    static func valvePoint(_ x: Float, _ y: Float, _ z: Float) -> SIMD3<Float> {
+        let c = cos(yaw), s = sin(yaw)
+        return SIMD3(c * x - s * z, tableTopY + y, s * x + c * z)
+    }
+
+    public static func scene(clutter: Bool = true) -> AnalyticScene {
+        let wood = SIMD3<UInt8>(176, 132, 88)
+        let floor = SIMD3<UInt8>(120, 116, 110)
         let brass = SIMD3<UInt8>(205, 170, 70)
+        let copper = SIMD3<UInt8>(184, 104, 58)
+        let steel = SIMD3<UInt8>(150, 156, 162)
         let red = SIMD3<UInt8>(200, 40, 35)
-        let white = SIMD3<UInt8>(235, 232, 225)
-        let backZ: Float = -0.10
-        let pipeZ = backZ + 0.035
-        return AnalyticScene(parts: [
-            // Backboard (3/4" plywood), 50 x 36 cm.
-            .init(.box(center: SIMD3(0, 0.18, backZ - 0.0095), halfExtents: SIMD3(0.25, 0.18, 0.0095)), color: plywood),
-            // 4" square electrical box, 2-1/8" deep, with a cover plate and a duplex receptacle.
-            .init(.box(center: SIMD3(-0.10, 0.17, backZ + 1.0625 * inch), halfExtents: SIMD3(2 * inch, 2 * inch, 1.0625 * inch)), color: steel),
-            .init(.box(center: SIMD3(-0.10, 0.17, backZ + 2.125 * inch + 0.002), halfExtents: SIMD3(2.1 * inch, 2.1 * inch, 0.002)), color: steel),
-            .init(.box(center: SIMD3(-0.10, 0.17, backZ + 2.125 * inch + 0.008), halfExtents: SIMD3(0.017, 0.033, 0.005)), color: white),
-            // 3/4" EMT conduit up out of the box, with a compression coupling.
-            .init(.cylinder(a: SIMD3(-0.10, 0.17 + 2 * inch, backZ + 0.03), b: SIMD3(-0.10, 0.36, backZ + 0.03), radius: 0.0118), color: conduit),
-            .init(.cylinder(a: SIMD3(-0.10, 0.27, backZ + 0.03), b: SIMD3(-0.10, 0.30, backZ + 0.03), radius: 0.0145), color: conduit),
-            // 3/4" copper supply line with a ball valve, its stem and a red lever handle.
-            .init(.cylinder(a: SIMD3(0.0, 0.10, pipeZ), b: SIMD3(0.25, 0.10, pipeZ), radius: 0.0111), color: copper),
-            .init(.sphere(center: SIMD3(0.12, 0.10, pipeZ), radius: 0.024), color: brass),
-            .init(.cylinder(a: SIMD3(0.09, 0.10, pipeZ), b: SIMD3(0.15, 0.10, pipeZ), radius: 0.017), color: brass),
-            .init(.cylinder(a: SIMD3(0.12, 0.10, pipeZ), b: SIMD3(0.12, 0.145, pipeZ), radius: 0.006), color: brass),
-            .init(.box(center: SIMD3(0.155, 0.15, pipeZ), halfExtents: SIMD3(0.045, 0.006, 0.004)), color: red),
-            // Pipe strap (a short wide band around the pipe).
-            .init(.cylinder(a: SIMD3(0.205, 0.10, pipeZ), b: SIMD3(0.215, 0.10, pipeZ), radius: 0.0138), color: steel),
-        ])
+        let mug = SIMD3<UInt8>(40, 90, 160)
+        let tape = SIMD3<UInt8>(235, 190, 30)
+        let v = valvePoint
+        var parts: [AnalyticScene.Part] = [
+            // Table top (4 cm thick) and the floor 75 cm below it.
+            .init(.box(center: SIMD3(0, tableTopY - 0.02, 0), halfExtents: SIMD3(0.70, 0.02, 0.45)), color: wood),
+            .init(.plane(point: SIMD3(0, 0, 0), normal: SIMD3(0, 1, 0)), color: floor),
+            // Ball housing (resting on the table), barrel and union ends.
+            .init(.sphere(center: v(0, 0.040, 0), radius: 0.040), color: brass),
+            .init(.cylinder(a: v(-0.058, 0.040, 0), b: v(0.058, 0.040, 0), radius: 0.030), color: brass),
+            .init(.cylinder(a: v(-0.078, 0.040, 0), b: v(-0.056, 0.040, 0), radius: 0.027), color: brass),
+            .init(.cylinder(a: v(0.056, 0.040, 0), b: v(0.078, 0.040, 0), radius: 0.027), color: brass),
+            // 3/4" copper pipe stubs (OD 22.2 mm).
+            .init(.cylinder(a: v(-0.125, 0.040, 0), b: v(-0.076, 0.040, 0), radius: 0.0111), color: copper),
+            .init(.cylinder(a: v(0.076, 0.040, 0), b: v(0.125, 0.040, 0), radius: 0.0111), color: copper),
+            // Stem, packing nut and the red lever (open: along the pipe).
+            .init(.cylinder(a: v(0, 0.075, 0), b: v(0, 0.098, 0), radius: 0.0065), color: steel),
+            .init(.cylinder(a: v(0, 0.076, 0), b: v(0, 0.086, 0), radius: 0.0115), color: steel),
+            .init(.orientedBox(center: v(0.045, 0.101, 0), halfExtents: SIMD3(0.060, 0.004, 0.011), yaw: yaw), color: red),
+        ]
+        if clutter {
+            // A mug and a tape measure on the same table, a hand's width away.
+            parts.append(.init(.cylinder(a: SIMD3(-0.24, tableTopY, -0.20), b: SIMD3(-0.24, tableTopY + 0.095, -0.20), radius: 0.042), color: mug))
+            parts.append(.init(.orientedBox(center: SIMD3(0.26, tableTopY + 0.0175, 0.12), halfExtents: SIMD3(0.034, 0.0175, 0.034),
+                                            yaw: -0.4), color: tape))
+        }
+        return AnalyticScene(parts: parts)
     }
 
-    /// World bounds of the demo object (fusion is limited to it, like the app's scan box).
-    public static let bounds: (min: SIMD3<Float>, max: SIMD3<Float>) = (SIMD3(-0.27, -0.02, -0.13), SIMD3(0.27, 0.38, 0.06))
+    /// Where the user stands to place the box: in front, a little to the side, looking down at 35 deg.
+    public static let placementPose = AnalyticScene.orbitPoses(target: target, distance: 0.50, count: 1,
+                                                               elevationsDegrees: [35], azimuthRangeDegrees: 25...25)[0]
 
-    /// Camera poses: 3 height bands (low, mid, high) of `perBand` views across the front, 0.45 m away.
-    public static func poses(perBand: Int = 6) -> [simd_float4x4] {
-        AnalyticScene.orbitPoses(target: SIMD3(0.0, 0.17, -0.07), distance: 0.45, count: perBand,
-                                 elevationsDegrees: [-20, 5, 30], azimuthRangeDegrees: -55...55)
+    /// Scan poses: 3 height bands (10, 30 and 52 deg) of `perBand` views all the way around, 0.42 m away.
+    public static func poses(perBand: Int = 12) -> [simd_float4x4] {
+        AnalyticScene.orbitPoses(target: target, distance: 0.42, count: perBand, elevationsDegrees: [10, 30, 52])
     }
 
-    /// Fuses the demo object and returns the extracted, colored mesh (world space).
-    public static func fuse(perBand: Int = 6, voxelSize: Float = 0.004, noise: Float = 0.0015,
-                            progress: ((Double) -> Void)? = nil) -> (mesh: FusedMesh, stats: TSDFVolume.Stats) {
-        var config = TSDFVolume.Configuration.detail
-        config.voxelSize = voxelSize
-        let volume = TSDFVolume(configuration: config)
-        let scene = scene()
+    /// One synthetic LiDAR frame (1.5 mm depth noise, high confidence).
+    public static func frame(pose: simd_float4x4, seed: UInt64, noise: Float = 0.0015, withColor: Bool = true) -> DepthFrame {
         let K = depthIntrinsics
+        let r = scene().render(intrinsics: K, cameraToWorld: pose, maxDistance: 2.5, noise: noise, seed: seed, withColor: withColor)
+        let color = withColor ? ColorImage(width: K.width, height: K.height, rgb: r.rgb, intrinsics: K) : nil
+        return DepthFrame(width: K.width, height: K.height, depth: r.depth, intrinsics: K, cameraToWorld: pose, color: color)
+    }
+
+    /// The box the app would fit from the placement view.
+    public static func fitBox(noise: Float = 0.0015) -> ObjectBoxFitter.Result? {
+        ObjectBoxFitter.fit(frame: frame(pose: placementPose, seed: 99, noise: noise, withColor: false))
+    }
+
+    public struct Result: Sendable {
+        /// Cleaned object mesh (world space): cropped to the box, table removed, clutter dropped.
+        public var mesh: FusedMesh
+        public var stats: TSDFVolume.Stats
+        public var fit: ObjectBoxFitter.Result
+        public var configuration: TSDFVolume.Configuration
+        public var margin: Float
+        public var cleanup: ObjectMeshCleaner.Report
+    }
+
+    /// Volume settings and fusion bounds for the fitted demo box.
+    public static func fusionSetup(_ fit: ObjectBoxFitter.Result) -> (configuration: TSDFVolume.Configuration, margin: Float,
+                                                                         bounds: (min: SIMD3<Float>, max: SIMD3<Float>)) {
+        let configuration = TSDFVolume.Configuration.object(for: fit.box)
+        let margin = ObjectScan.margin(voxelSize: configuration.voxelSize)
+        return (configuration, margin, fit.box.aabb(margin: margin))
+    }
+
+    /// Runs the whole object pipeline on the synthetic orbit. Nil only if the box fit fails.
+    public static func fuse(perBand: Int = 12, noise: Float = 0.0015, progress: ((Double) -> Void)? = nil) -> Result? {
+        guard let fit = fitBox(noise: noise) else { return nil }
+        let setup = fusionSetup(fit)
+        let volume = TSDFVolume(configuration: setup.configuration)
         let poses = poses(perBand: perBand)
         for (k, pose) in poses.enumerated() {
-            let frame = scene.render(intrinsics: K, cameraToWorld: pose, maxDistance: 1.2, noise: noise, seed: UInt64(k + 1), withColor: true)
-            let color = ColorImage(width: K.width, height: K.height, rgb: frame.rgb, intrinsics: K)
-            volume.integrate(DepthFrame(width: K.width, height: K.height, depth: frame.depth, intrinsics: K,
-                                        cameraToWorld: pose, color: color), bounds: bounds)
+            volume.integrate(frame(pose: pose, seed: UInt64(k + 1), noise: noise), bounds: setup.bounds)
             progress?(0.8 * Double(k + 1) / Double(poses.count))
         }
-        let mesh = volume.extractMesh(minWeight: 2) { progress?(0.8 + 0.2 * $0) }
-        return (mesh, volume.stats)
+        let raw = volume.extractMesh(minWeight: 3) { progress?(0.8 + 0.15 * $0) }
+        let cleaned = ObjectMeshCleaner.clean(raw, box: fit.box, margin: setup.margin, planeY: fit.planeY,
+                                              voxelSize: setup.configuration.voxelSize)
+        progress?(1)
+        return Result(mesh: cleaned.mesh, stats: volume.stats, fit: fit, configuration: setup.configuration,
+                      margin: setup.margin, cleanup: cleaned.report)
     }
 }

@@ -226,8 +226,9 @@ struct TSDFFusionTests {
     @Test func integrationAndExtractionAreDeterministic() {
         let scene = DemoDetailScan.scene()
         let poses = Array(DemoDetailScan.poses(perBand: 3))
+        let bounds = ObjectBox(center: DemoDetailScan.target, halfExtents: SIMD3(0.15, 0.08, 0.08)).aabb()
         func run() -> FusedMesh {
-            fuse(scene, poses: poses, config: .detail, noise: 0.002, withColor: true, bounds: DemoDetailScan.bounds).extractMesh()
+            fuse(scene, poses: poses, config: .detail, noise: 0.002, withColor: true, bounds: bounds).extractMesh()
         }
         let a = run(), b = run()
         #expect(a.vertexCount > 0)
@@ -250,21 +251,23 @@ struct TSDFFusionTests {
         #expect(a.allSatisfy { abs($0.position.z + 0.7) < 0.01 })
     }
 
-    @Test func demoDetailScanFusesTheUtilityCorner() {
+    @Test func demoDetailScanIsTheValveOnTheTable() throws {
         let start = Date()
-        let result = DemoDetailScan.fuse()
+        let result = try #require(DemoDetailScan.fuse())
         let elapsed = Date().timeIntervalSince(start)
-        print("Demo Detail scan: \(result.stats.framesIntegrated) frames, \(result.stats.blockCount) blocks, \(result.mesh.vertexCount) vertices, \(result.mesh.triangleCount) triangles in \(String(format: "%.2f", elapsed)) s")
+        print("Demo object Detail scan: \(result.stats.framesIntegrated) frames at \(result.configuration.voxelSize * 1000) mm, \(result.stats.blockCount) blocks, \(result.mesh.vertexCount) vertices, \(result.mesh.triangleCount) triangles in \(String(format: "%.2f", elapsed)) s; cleanup \(result.cleanup)")
         #expect(result.mesh.triangleCount > 20_000)
         #expect(result.mesh.colors.count == result.mesh.vertexCount)
-        // The 3/4" copper line (r = 11.1 mm) is resolved: vertices exist around it at its radius.
-        let axisY: Float = 0.10, axisZ: Float = -0.065
-        let onPipe = result.mesh.positions.filter { $0.x > 0.18 && $0.x < 0.2 && abs(((($0.y - axisY) * ($0.y - axisY) + ($0.z - axisZ) * ($0.z - axisZ))).squareRoot() - 0.0111) < 0.003 }
-        #expect(onPipe.count > 20)
+        // The 3/4" copper stub (r = 11.1 mm) is resolved: vertices around its axis at its radius.
+        let c = cos(DemoDetailScan.yaw), s = sin(DemoDetailScan.yaw)
+        let onPipe = result.mesh.positions.filter { p in
+            let lx = c * p.x + s * p.z, lz = -s * p.x + c * p.z, ly = p.y - DemoDetailScan.tableTopY - 0.040
+            return lx > 0.095 && lx < 0.115 && abs((ly * ly + lz * lz).squareRoot() - 0.0111) < 0.002
+        }
+        #expect(onPipe.count > 50)
         // Prepared for export like any mesh scan: colors survive normalization.
-        let prepared = MeshNormalizer.prepareForExport(result.mesh.classifiedMesh())
+        let prepared = MeshNormalizer.prepareForExport(result.mesh.classifiedMesh(), baseY: result.fit.planeY)
         #expect(prepared.mesh.hasVertexColors)
-        #expect(prepared.measurements.width > 0.45 && prepared.measurements.width < 0.56)
     }
 
     @Test func performanceOfOneHundredFrames() {
@@ -298,8 +301,8 @@ struct TSDFFusionTests {
     // MARK: Colored exports
 
     @Test func coloredExportsCarryVertexColors() throws {
-        let fused = DemoDetailScan.fuse(perBand: 3)
-        let prepared = MeshNormalizer.prepareForExport(fused.mesh.classifiedMesh())
+        let fused = try #require(DemoDetailScan.fuse(perBand: 6))
+        let prepared = MeshNormalizer.prepareForExport(fused.mesh.classifiedMesh(), baseY: fused.fit.planeY)
         let output = LiDARMeshExporter.export(prepared, title: "Demo Detail scan", units: .imperial)
         let files = Dictionary(uniqueKeysWithValues: output.files.map { ($0.name, $0.data) })
         // OBJ: "v x y z r g b".

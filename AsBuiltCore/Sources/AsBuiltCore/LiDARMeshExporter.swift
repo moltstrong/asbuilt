@@ -16,8 +16,9 @@ public enum LiDARMeshExporter {
 
     /// `mesh` should come from `MeshNormalizer.prepareForExport` (aligned, centered, on the floor).
     /// `progress` gets 0...1 as files are written.
+    /// `object`: object Detail scan (measurements.csv in inches / millimeters, object wording).
     public static func export(_ prepared: MeshNormalizer.Result, title: String, units: UnitSystem,
-                              includePLY: Bool = true, progress: ((Double) -> Void)? = nil) -> Output {
+                              includePLY: Bool = true, object: Bool = false, progress: ((Double) -> Void)? = nil) -> Output {
         let mesh = prepared.mesh
         let m = prepared.measurements
         var files: [(name: String, data: Data)] = []
@@ -31,7 +32,7 @@ public enum LiDARMeshExporter {
             files.append((plyName, PLYWriter.write(mesh: mesh, name: title)))
         }
         progress?(0.9)
-        files.append((csvName, Data(MeshMeasurementsCSV.write(m, title: title, units: units).utf8)))
+        files.append((csvName, Data(MeshMeasurementsCSV.write(m, title: title, units: units, object: object).utf8)))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         if let info = try? encoder.encode(m) { files.append((infoName, info)) }

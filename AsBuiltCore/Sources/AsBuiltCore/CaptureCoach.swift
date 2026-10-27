@@ -5,7 +5,8 @@ import simd
 
 /// Capture flows the coach supports. Thresholds differ per mode (`CoachThresholds.for(_:)`).
 public enum CoachMode: String, Sendable, CaseIterable, Codable {
-    /// TSDF Detail scan: close range, slow, three height passes around the object.
+    /// Object Detail scan (TSDF fusion inside a fitted box): close range, slow, three height passes
+    /// around the box.
     case detail
     /// ARKit LiDAR Mesh (room/space scale).
     case mesh
@@ -47,9 +48,11 @@ public enum CoachIssue: Int, Sendable, CaseIterable, Comparable, Hashable {
     case tracking = 0
     case tooDark = 1
     case tooFast = 2
-    case tooFar = 3
-    case tooClose = 4
-    case lowTexture = 5
+    /// Object scans: the fitted box is out of view (only fed as an external issue).
+    case offTarget = 3
+    case tooFar = 4
+    case tooClose = 5
+    case lowTexture = 6
 
     public static func < (a: CoachIssue, b: CoachIssue) -> Bool { a.rawValue < b.rawValue }
 
@@ -93,7 +96,8 @@ public struct CoachFrame: Sendable {
 // MARK: - Thresholds
 
 public enum CoverageKind: String, Sendable, Hashable {
-    /// Camera position around the scan centroid (objects): 12 azimuth sectors x 3 elevation bands.
+    /// Camera position around the scan center (objects): 12 azimuth sectors x 3 elevation bands. The
+    /// center is the object box when one is set (`CaptureCoach.setOrbitCenter`), else an estimate.
     case orbit
     /// Camera heading (spaces): 12 compass sectors x 3 pitch bands (floor / level / ceiling).
     case lookAround
@@ -147,7 +151,8 @@ public struct CoachThresholds: Sendable, Hashable {
     public static func `for`(_ mode: CoachMode) -> CoachThresholds {
         switch mode {
         case .detail:
-            return CoachThresholds(minDistance: 0.25, maxDistance: 1.0, maxLinearSpeed: 0.25, maxAngularSpeed: 30,
+            // Distance = phone to the object box (see `ObjectScan.coachFrame`): arm's length.
+            return CoachThresholds(minDistance: 0.25, maxDistance: 0.8, maxLinearSpeed: 0.25, maxAngularSpeed: 30,
                                    darkIntensity: 250, brightIntensity: 400, lowConfidenceFraction: 0.35,
                                    lowFeatureCount: 40, lowTextureSeconds: 2.5, usesDistance: true, usesLight: true,
                                    usesTexture: true, coverage: .orbit, framesPerCell: 10, bandEdges: (12, 40),
@@ -191,6 +196,8 @@ public enum Guidance: Sendable, Hashable {
     case tooFast
     case tooFar
     case tooClose
+    /// Object scans: the object box left the view.
+    case aimAtObject
     case lowTexture
     case holdSteady
     /// Next height band (orbit: move the phone; look-around: aim the phone).
@@ -207,6 +214,7 @@ public enum Guidance: Sendable, Hashable {
         case .tooFast: return "Slow down"
         case .tooFar: return "Closer"
         case .tooClose: return "Back up"
+        case .aimAtObject: return "Aim at object"
         case .lowTexture: return "Shiny or plain"
         case .holdSteady: return "Hold steady"
         case .nextBand(_, let lower):
@@ -226,6 +234,7 @@ public enum Guidance: Sendable, Hashable {
         case .tooFast: return "tortoise.fill"
         case .tooFar: return "arrow.down.right.and.arrow.up.left"
         case .tooClose: return "arrow.up.left.and.arrow.down.right"
+        case .aimAtObject: return "scope"
         case .lowTexture: return "sparkles"
         case .holdSteady: return "hand.raised.fill"
         case .nextBand(_, let lower): return lower ? "arrow.down.circle.fill" : "arrow.up.circle.fill"
@@ -237,7 +246,7 @@ public enum Guidance: Sendable, Hashable {
     /// Bad technique (red/orange cue, progress paused).
     public var isProblem: Bool {
         switch self {
-        case .trackingLost, .tooDark, .tooFast, .tooFar, .tooClose, .holdSteady: return true
+        case .trackingLost, .tooDark, .tooFast, .tooFar, .tooClose, .aimAtObject, .holdSteady: return true
         default: return false
         }
     }
@@ -247,6 +256,7 @@ public enum Guidance: Sendable, Hashable {
         case .tracking: self = tracking == .initializing ? .gettingReady : (tracking == .excessiveMotion ? .tooFast : .trackingLost)
         case .tooDark: self = .tooDark
         case .tooFast: self = mode == .measure ? .holdSteady : .tooFast
+        case .offTarget: self = .aimAtObject
         case .tooFar: self = .tooFar
         case .tooClose: self = .tooClose
         case .lowTexture: self = .lowTexture
@@ -452,6 +462,8 @@ public struct CaptureCoach: Sendable {
     private var counts: [[Int]] = Array(repeating: Array(repeating: 0, count: 12), count: 3)
     private var centroid: SIMD3<Float>?
     private var centroidSamples = 0
+    /// Object scans: the centroid is the fitted box center and never drifts.
+    private var centroidFixed = false
     private var currentBand: CoachBand?
     private var currentSector: Int?
     private var targetBand: CoachBand?
@@ -521,6 +533,18 @@ public struct CaptureCoach: Sendable {
         targetBand = nil
     }
 
+    /// Object scans: coverage is measured around this point (the fitted box center) instead of an
+    /// estimate from where the camera looks. Kept until `reset()`.
+    public mutating func setOrbitCenter(_ center: SIMD3<Float>) {
+        guard center.x.isFinite, center.y.isFinite, center.z.isFinite else { return }
+        centroid = center
+        centroidSamples = Int.max / 2
+        centroidFixed = true
+    }
+
+    /// The fixed orbit center, if one was set.
+    public var orbitCenter: SIMD3<Float>? { centroidFixed ? centroid : nil }
+
     /// Speed from two poses `dt` seconds apart: (m/s, deg/s).
     public static func speeds(from a: simd_float4x4, to b: simd_float4x4, dt: Double) -> (linear: Float, angular: Float) {
         guard dt > 1e-6 else { return (0, 0) }
@@ -572,6 +596,8 @@ public struct CaptureCoach: Sendable {
             case .tooFast:
                 guard speedSamples > 0 else { return false }
                 return active ? speedFraction > 1 - h : speedFraction > 1
+            case .offTarget:
+                return false // external only
             case .tooFar:
                 guard th.usesDistance, let d = frame.centerDepth, d > 0 else { return th.usesDistance && frame.centerDepth == 0 ? true : false }
                 return active ? d > th.maxDistance * (1 - h) : d > th.maxDistance
@@ -601,7 +627,8 @@ public struct CaptureCoach: Sendable {
                 latch.clearSince = nil
                 if latch.conditionSince == nil { latch.conditionSince = t }
                 // Tracking and external issues show without delay; metric issues need `enterSeconds`.
-                let immediate = issue == .tracking || frame.external.contains(issue) || issue == .lowTexture
+                // Off target goes through the normal delay: a glance away must not flash the cue.
+                let immediate = issue == .tracking || (frame.external.contains(issue) && issue != .offTarget) || issue == .lowTexture
                 if !latch.active && (immediate || t - latch.conditionSince! >= enterSeconds) { latch.active = true }
             } else {
                 latch.conditionSince = nil
@@ -800,7 +827,7 @@ public struct CaptureCoach: Sendable {
     /// Returns (new cell done, band/pass event).
     private mutating func updateCoverage(pose: simd_float4x4, depth: Float?, time t: Double) -> (Bool, Bool) {
         let th = thresholds
-        if th.coverage == .orbit, let d = depth, d > 0 {
+        if th.coverage == .orbit, !centroidFixed, let d = depth, d > 0 {
             // The point the camera looks at; the centroid settles over the first 90 good frames, then drifts slowly.
             let target = RigidTransform.translation(pose) + RigidTransform.forward(pose) * d
             if let c = centroid {
@@ -873,7 +900,7 @@ public struct CaptureCoach: Sendable {
         let tracked = max(trackedSeconds, 1e-6)
         let fast = Float((issueSeconds[.tooFast] ?? 0) / tracked)
         let dark = Float((issueSeconds[.tooDark] ?? 0) / tracked)
-        let dist = Float(((issueSeconds[.tooFar] ?? 0) + (issueSeconds[.tooClose] ?? 0)) / tracked)
+        let dist = Float(((issueSeconds[.tooFar] ?? 0) + (issueSeconds[.tooClose] ?? 0) + (issueSeconds[.offTarget] ?? 0)) / tracked)
         let texture = Float((issueSeconds[.lowTexture] ?? 0) / tracked)
         let lost = Float((issueSeconds[.tracking] ?? 0) / tracked)
         let good = trackedSeconds > 0 ? Float(goodSeconds / tracked) : 0
@@ -919,7 +946,7 @@ public struct CaptureCoach: Sendable {
         let technique: [(Float, String)] = [
             (fast, "Mostly scanned too fast"),
             (dark, "Low light: turn on lights"),
-            (dist, thresholds.coverage == .orbit ? "Mostly too far: stay within 1 m" : "Mostly out of range"),
+            (dist, thresholds.coverage == .orbit ? "Mostly out of range: keep the object at arm's length" : "Mostly out of range"),
             (lost, "Tracking lost often: move slower, add light"),
             (texture * 0.7, "Shiny or plain surface: matte spray helps"),
         ]

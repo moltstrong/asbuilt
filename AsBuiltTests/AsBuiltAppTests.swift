@@ -359,6 +359,14 @@ final class AsBuiltAppTests: XCTestCase {
         let id = SampleData.demoDetailCaptureID
         let capture = try XCTUnwrap(store.capture(job: SampleData.demoJobID, capture: id))
         XCTAssertTrue(capture.isDetailScan)
+        XCTAssertEqual(capture.title, JobStore.demoDetailTitle)
+        // Build 10: an object (the ball valve) measured from the table, within a voxel of its true size.
+        let m = try XCTUnwrap(store.meshMeasurements(job: SampleData.demoJobID, capture: id))
+        XCTAssertEqual(m.width, Double(DemoDetailScan.trueSize.x), accuracy: 0.002)
+        XCTAssertEqual(m.depth, Double(DemoDetailScan.trueSize.y), accuracy: 0.002)
+        XCTAssertEqual(m.height, Double(DemoDetailScan.trueSize.z), accuracy: 0.002)
+        XCTAssertEqual(store.job(SampleData.demoJobID)?.allObjectCaptures.map(\.id), [id])
+        XCTAssertEqual(store.job(SampleData.demoJobID)?.roomMeshCaptures.map(\.id), [SampleData.demoMeshCaptureID])
         let names = Set(store.files(job: SampleData.demoJobID, capture: id).map(\.lastPathComponent))
         for expected in [CaptureFile.modelUSDZ, CaptureFile.meshOBJ, CaptureFile.meshPLY, CaptureFile.meshCSV, CaptureFile.coachReport] {
             XCTAssertTrue(names.contains(expected), "missing \(expected), have \(names)")
@@ -379,6 +387,113 @@ final class AsBuiltAppTests: XCTestCase {
         XCTAssertEqual(Router.initialPath(for: "detail").count, 2)
         XCTAssertEqual(Router.initialPath(for: "measurements").count, 2)
         XCTAssertEqual(Router.initialPath(for: "coach-grade").count, 1)
+        XCTAssertEqual(Router.initialPath(for: "detail-place"), [.objectPlacePreview])
+    }
+
+    // MARK: Build 10: Detail scan is an object scan
+
+    /// A job.json as build 9 wrote it, with a room-style Detail scan (kind mesh, origin detailScan).
+    private static let build9JobJSON = """
+    {
+      "address" : "",
+      "captures" : [
+        {
+          "coachFix" : "Gaps on the back side",
+          "coachGrade" : "B",
+          "createdAt" : "2026-10-25T18:01:02Z",
+          "id" : "11111111-2222-4333-8444-777777777777",
+          "kind" : "mesh",
+          "measurements" : {
+            "alignmentYawDegrees" : 12.5,
+            "classes" : [ { "area" : 0.42, "classification" : 0, "triangles" : 51234 } ],
+            "depth" : 0.31,
+            "height" : 0.52,
+            "surfaceArea" : 0.42,
+            "triangleCount" : 51234,
+            "vertexCount" : 26001,
+            "width" : 0.88
+          },
+          "notes" : "Detail scan (LiDAR depth fusion, 4 mm voxels): 0.88 m × 0.31 m × 0.52 m (W × D × H), 51234 triangles.",
+          "origin" : "detailScan",
+          "status" : "complete",
+          "title" : "Panel"
+        },
+        {
+          "createdAt" : "2026-10-25T17:00:00Z",
+          "id" : "11111111-2222-4333-8444-888888888888",
+          "kind" : "mesh",
+          "notes" : "",
+          "origin" : "lidarMesh",
+          "status" : "complete",
+          "title" : "Mech room"
+        }
+      ],
+      "client" : "",
+      "createdAt" : "2026-10-25T16:00:00Z",
+      "id" : "AAAAAAAA-BBBB-4CCC-8DDD-999999999999",
+      "isDemo" : false,
+      "measurements" : [],
+      "name" : "Build 9 job",
+      "notes" : "",
+      "updatedAt" : "2026-10-25T18:05:00Z"
+    }
+    """
+
+    func testBuild9DetailScansStillDecodeAndShowAsObjects() throws {
+        let job = try Self.decoder().decode(Job.self, from: Data(Self.build9JobJSON.utf8))
+        XCTAssertEqual(job.captures.count, 2)
+        let detail = try XCTUnwrap(job.captures.first { $0.title == "Panel" })
+        XCTAssertEqual(detail.kind, .mesh)
+        XCTAssertEqual(detail.origin, .detailScan)
+        XCTAssertTrue(detail.isDetailScan)
+        XCTAssertEqual(detail.coachGrade, "B")
+        XCTAssertEqual(detail.measurements?.width ?? 0, 0.88, accuracy: 1e-9)
+        XCTAssertEqual(detail.measurements?.triangleCount, 51234)
+        // Job screen: the old Detail scan is listed with the objects, the room mesh with the rooms.
+        XCTAssertEqual(job.allObjectCaptures.map(\.title), ["Panel"])
+        XCTAssertEqual(job.roomMeshCaptures.map(\.title), ["Mech room"])
+        XCTAssertEqual(job.meshCaptures.count, 2)
+        // And it loads from disk and round-trips unchanged.
+        let dir = root.appendingPathComponent(job.id.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data(Self.build9JobJSON.utf8).write(to: dir.appendingPathComponent("job.json"))
+        let store = makeStore()
+        let loaded = try XCTUnwrap(store.job(job.id))
+        XCTAssertEqual(loaded.captures.first { $0.isDetailScan }?.measurements, detail.measurements)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        XCTAssertEqual(try Self.decoder().decode(Capture.self, from: encoder.encode(detail)), detail)
+    }
+
+    func testOldRoomDetailPickerSettingIsIgnoredAndCleared() {
+        // Builds 6-9 stored the LiDAR screen's Room/Detail picker; a leftover "detail" must not matter.
+        defaults.set("detail", forKey: JobStore.legacyLiDARModeKey)
+        let store = makeStore()
+        XCTAssertNil(defaults.string(forKey: JobStore.legacyLiDARModeKey))
+        store.ensureDemoJob()
+        XCTAssertNotNil(store.job(SampleData.demoJobID))
+    }
+
+    func testOldDemoUtilityCornerIsReplacedByTheObjectSample() async throws {
+        let store = makeStore()
+        store.ensureDemoJob()
+        // What builds 6-9 left: the wall-mounted "Panel box + valve" sample with files.
+        var job = try XCTUnwrap(store.job(SampleData.demoJobID))
+        let index = try XCTUnwrap(job.captures.firstIndex { $0.id == SampleData.demoDetailCaptureID })
+        job.captures[index].title = "Panel box + valve (Detail scan)"
+        store.save(job, touch: false)
+        let dir = store.captureDirectory(job: SampleData.demoJobID, capture: SampleData.demoDetailCaptureID)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: dir.appendingPathComponent(CaptureFile.meshOBJ))
+
+        let relaunch = makeStore()
+        relaunch.ensureDemoJob()
+        XCTAssertEqual(relaunch.capture(job: SampleData.demoJobID, capture: SampleData.demoDetailCaptureID)?.title,
+                       JobStore.demoDetailTitle)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent(CaptureFile.meshOBJ).path),
+                       "old files are dropped at launch (JSON + delete only) and regenerated later")
+        await relaunch.prepareDemoExports()
+        XCTAssertNotNil(relaunch.modelURL(job: SampleData.demoJobID, capture: SampleData.demoDetailCaptureID))
     }
 
     func testDetailStageCrashLoopBreaker() async throws {
