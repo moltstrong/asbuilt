@@ -141,7 +141,7 @@ To regenerate the project after adding files: `brew install xcodegen && xcodegen
 
 Object scans upload to a cloud build server on Modal (CPU only: pycolmap SfM + OpenMVS + CloudRecon's photo bake,
 metric scale from the iPhone's LiDAR depth). It speaks the same v1 API the Mac server did, so the apps only needed a
-new address (the discovery gist). About 20 minutes and $0.35 for a 41-photo scan. See
+new address (the discovery gist). About 20-26 minutes and $0.50-0.65 for a 41-photo scan. See
 [CloudRecon/README.md](CloudRecon/README.md).
 
 ## Full-detail models on a Mac (`MacRecon/`, retired as the build server)

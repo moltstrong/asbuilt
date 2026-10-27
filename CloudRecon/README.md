@@ -24,29 +24,31 @@ it from source with the upstream TextureMesh seam-leveling fix (`bakeoff/openmvs
 Status (2026-10-27): **deployed and live**; the discovery gist points the apps here. End to end through the public
 URL with `scripts/recon-client.py e2e` on the stump (41 × 12 MP JPEG, 168 MB): 24/24 checks passed (auth,
 chunk/whole-file sha errors, interrupted + resumed upload, live progress, Range-resumed download, sha256,
-`usdchecker --arkit` Success, model.glb): 226k triangles, 8K texture, 20 MB USDZ.
+`usdchecker --arkit` Success, model.glb): 226-230k triangles, 8K texture, 20 MB USDZ; side by side with Apple Object
+Capture's model of the same photos they look the same.
 
 ## Time and cost per scan (measured)
 
-41 photos at 2000 px on a Modal CPU container, 16 cores / 32 GiB (no GPU):
+41 photos at 2000 px on a Modal CPU container, 16 cores / 32 GiB requested (no GPU). Two full runs:
 
-| stage | seconds |
-|---|---|
-| unzip + decode/resize | 10 |
-| SfM (pycolmap CPU: extract, match, global mapper, undistort) | 81 |
-| DensifyPointCloud (full resolution, 32 threads) | 543 |
-| ReconstructMesh | 113 |
-| crop | 22 |
-| RefineMesh | 293 |
-| bake (decimate, unwrap, two 8K passes) | 111 |
-| scale, orient, USDZ/OBJ, thumbnail | 4 |
-| **build total** | **1182 (19.7 min)** |
+| stage | run 1 (s) | run 2 (s) |
+|---|---|---|
+| unzip + decode/resize | 10 | 11 |
+| SfM (pycolmap CPU: extract, match, global mapper, undistort) | 81 | 92 |
+| DensifyPointCloud (full resolution, 32 threads) | 543 | 846 |
+| ReconstructMesh | 113 | 143 |
+| crop | 22 | 23 |
+| RefineMesh | 293 | 333 |
+| bake (decimate, unwrap, two 8K passes) | 111 | 125 |
+| scale, orient, USDZ/OBJ, thumbnail | 4 | 4 |
+| **build total** | **1182 (19.7 min)** | **1583 (26.4 min)** |
 
-Upload of the 168 MB zip took 9 s from a home connection; the 20 MB model downloaded in 4 s. Price: 16 × $0.0000131
-+ 32 × $0.00000222 = $0.00028/s for the build container, so **≈ $0.33 per 41-photo scan**, plus ≈ $0.04 for the API
-container (1 core, 2 GiB; it scales to zero 20 min after the last request). The Starter plan's $30/month credit
-covers about 80 such scans. Densify and refine grow roughly with the photo count: a 100-photo capture is about
-40 min and $0.8.
+The spread is the host CPU (same input). Upload of the 168 MB zip took 9 s from a home connection; the 20 MB model
+downloaded in 4 s. Cost from `modal billing report`: the build container bursts above its 16-core request and bills
+about $0.00036-0.00041/s (list price for exactly 16 cores / 32 GiB would be $0.00028/s), so **≈ $0.50-0.65 per 41-photo
+scan**, plus a few cents for the API container (1 core, 2 GiB; it scales to zero 20 min after the last request). The
+Starter plan's $30/month credit covers about 50 such scans. Densify and refine grow roughly with the photo count, so
+a 100-photo capture is about 45-60 min. An 800 px smoke of the same set takes about 6 min (~$0.15).
 
 ## Files
 
@@ -75,9 +77,10 @@ when the best one is tight (MAD of log-ratio < 6 %) over ≥ 200 samples in ≥ 
 as if the photos were taken 1 m away. Tested on synthetic depth maps; **not yet on a real iPhone capture**.
 
 Up = the direction most perpendicular to every camera's x axis (people tilt the phone but don't roll it), which
-stays unbiased when the photos look down at the object from one side. On the stump the mean camera "up" was 14° off
-and a ground-plane fit about 30° off. The origin is the look-at point dropped onto a ground plane perpendicular to
-that up (within 10°), else onto the lowest mesh points.
+stays unbiased when the photos look up or down at the object from one side; the mean camera "up" was 14° away from
+it on the stump. A ground-plane fit can lock onto a big flat face of the object, so it only sets the origin: the
+look-at point dropped onto a ground plane perpendicular to that up (within 10°), else onto the lowest mesh points.
+On the stump the result matches Apple's frame (ground within 2.4° of level).
 
 ## Tests (Mac or Linux; no GPU, no account)
 
