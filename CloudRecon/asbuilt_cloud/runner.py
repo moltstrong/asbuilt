@@ -1,10 +1,10 @@
 """Entry point for one build: `python -m asbuilt_cloud.runner --input X.zip --out DIR --status-file S --options JSON`.
 
---stages real  : COLMAP/pycolmap SfM + gsplat training (CUDA) + CPU splat->mesh + exports
---stages fake  : CPU-only stand-ins for the two GPU stages (tests): SfM is replaced by a synthetic
-                 COLMAP model of a textured sphere seen by a ring of cameras, training by a splat
-                 sampled on that sphere. Everything after (TSDF, cleanup, unwrap, bake, USDZ/OBJ/thumbnail,
-                 result.json, status.json) is the real code.
+--stages real  : pycolmap SfM + OpenMVS mesh (CPU, default) or gsplat training (CUDA, CLOUD_MESHER=splat) + exports
+--stages fake  : CPU-only stand-ins for the heavy stages (tests): SfM is replaced by a synthetic COLMAP model of
+                 a textured sphere seen by a ring of cameras; OpenMVS by that sphere's mesh (through the real
+                 crop); splat training by a splat sampled on it. Everything after (crop, decimate, unwrap,
+                 two-band bake, scale/orientation, USDZ/OBJ/thumbnail, result.json, status.json) is the real code.
 """
 import argparse
 import json
@@ -58,7 +58,8 @@ class FakeStages(pipeline.Stages):
             Image.fromarray(self._render(R, t)).save(os.path.join(undist, "images", name), quality=95)
         write_colmap_model(os.path.join(undist, "sparse"), cams, self.W, self.H, self.F)
         log("fake sfm: %d synthetic cameras (ignoring %d uploaded photos)" % (len(cams), len(os.listdir(images))))
-        self.sfm_summary = {"mapper": "fake", "registered": len(cams), "images": len(cams)}
+        self.sfm_summary = {"mapper": "fake", "registered": len(cams), "images": len(cams),
+                            "model": os.path.join(undist, "sparse")}
         return undist
 
     def train_splat(self, undist, work, log, steps=30000, progress=None):
@@ -71,6 +72,48 @@ class FakeStages(pipeline.Stages):
             progress(1.0)
         log("fake training: %d gaussians on the unit sphere" % n)
         return ply
+
+    def mvs_mesh(self, undist, work, log, progress=None):
+        """Stand-in for OpenMVS: the unit sphere the synthetic photos show (plus a far-away speck that the
+        real crop must remove), run through the real crop code."""
+        from . import colmap_io, openmvs_mesh
+        V, F = icosphere(4)
+        speck_v, speck_f = icosphere(1)
+        V = np.concatenate([V, speck_v * 0.05 + [40.0, 0, 0]])
+        F = np.concatenate([F, speck_f + len(icosphere(4)[0])])
+        cams = colmap_io.load_pinhole_model(os.path.join(undist, "sparse"))
+        V, F, info = openmvs_mesh.crop(V, F, cams, min_frac=0.1, radius_factor=1.6)
+        if progress:
+            progress("meshGeneration", 1.0, "Building the mesh")
+        log("fake openmvs: sphere %d verts %d tris after crop %s" % (len(V), len(F), info))
+        return V, F, {"crop": info, "seconds": {}, "threads": 1}
+
+
+def icosphere(level):
+    """Unit icosphere (outward CCW faces): 20 * 4**level triangles."""
+    t = (1 + 5 ** 0.5) / 2
+    V = [(-1, t, 0), (1, t, 0), (-1, -t, 0), (1, -t, 0), (0, -1, t), (0, 1, t), (0, -1, -t), (0, 1, -t),
+         (t, 0, -1), (t, 0, 1), (-t, 0, -1), (-t, 0, 1)]
+    F = [(0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11), (1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6),
+         (7, 1, 8), (3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9), (4, 9, 5), (2, 4, 11), (6, 2, 10),
+         (8, 6, 7), (9, 8, 1)]
+    V = [np.array(v, float) / np.linalg.norm(v) for v in V]
+    for _ in range(level):
+        cache, F2 = {}, []
+
+        def mid(a, b):
+            k = (min(a, b), max(a, b))
+            if k not in cache:
+                m = V[a] + V[b]
+                V.append(m / np.linalg.norm(m))
+                cache[k] = len(V) - 1
+            return cache[k]
+
+        for a, b, c in F:
+            ab, bc, ca = mid(a, b), mid(b, c), mid(c, a)
+            F2 += [(a, ab, ca), (b, bc, ab), (c, ca, bc), (ab, bc, ca)]
+        F = F2
+    return np.array(V), np.array(F, np.int64)
 
 
 def write_colmap_model(d, cams, W, H, f):
@@ -147,7 +190,7 @@ def main(argv=None):
         kw = dict(max_side=400, steps=10, tris_override=4000, texture_px_override=512)
     r = pipeline.build(a.input, a.out, detail=o.get("detail", "full"), texture=o.get("texture", "8k"),
                        max_polys=o.get("maxPolygons"), obj=bool(o.get("obj", True)), status_file=a.status_file,
-                       title=o.get("title"), stages=stages, echo=False, **kw)
+                       title=o.get("title"), stages=stages, echo=False, mesher=o.get("mesher"), **kw)
     print(json.dumps({k: r.get(k) for k in ("ok", "polygons", "totalSeconds", "errorMessage")}))
     return 0 if r.get("ok") else 1
 

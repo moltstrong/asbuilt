@@ -15,6 +15,29 @@ import sys
 import time
 
 
+def group_by_size(images, work):
+    """One shared camera per image size. Upright (EXIF-rotated) photos of one phone come in two sizes when some
+    were taken in portrait and some in landscape; a single shared camera would leave one group unregistered
+    (5 of 41 on the stump dataset). One size -> SINGLE camera on the flat folder (names unchanged); several ->
+    PER_FOLDER on <W>x<H>/ symlink folders (image names then carry that prefix)."""
+    import pycolmap
+    from PIL import Image
+    names = sorted(n for n in os.listdir(images) if not n.startswith("."))
+    by_size = {}
+    for n in names:
+        with Image.open(os.path.join(images, n)) as im:
+            by_size.setdefault("%dx%d" % im.size, []).append(n)
+    if len(by_size) <= 1:
+        return images, pycolmap.CameraMode.SINGLE
+    grouped = os.path.join(work, "images_by_size")
+    shutil.rmtree(grouped, ignore_errors=True)
+    for size, group in by_size.items():
+        os.makedirs(os.path.join(grouped, size))
+        for n in group:
+            os.symlink(os.path.realpath(os.path.join(images, n)), os.path.join(grouped, size, n))
+    return grouped, pycolmap.CameraMode.PER_FOLDER
+
+
 def run_sfm(images, work, gpu=False, single_camera=True, max_features=16384, log=print):
     import pycolmap
     t0 = time.time()
@@ -27,8 +50,8 @@ def run_sfm(images, work, gpu=False, single_camera=True, max_features=16384, log
     reader.camera_model = "OPENCV"
     ext = pycolmap.FeatureExtractionOptions()
     ext.sift.max_num_features = max_features
-    pycolmap.extract_features(db, images, camera_mode=pycolmap.CameraMode.SINGLE if single_camera else pycolmap.CameraMode.AUTO,
-                              reader_options=reader, extraction_options=ext, device=device)
+    images, mode = group_by_size(images, work) if single_camera else (images, pycolmap.CameraMode.AUTO)
+    pycolmap.extract_features(db, images, camera_mode=mode, reader_options=reader, extraction_options=ext, device=device)
     t_ext = time.time() - t0
     pycolmap.match_exhaustive(db, device=device)
     t_match = time.time() - t0 - t_ext
@@ -64,12 +87,12 @@ def run_sfm(images, work, gpu=False, single_camera=True, max_features=16384, log
         p = os.path.join(undist, "sparse", f)
         if os.path.isfile(p):
             shutil.copy2(p, os.path.join(s0, f))
-    n_imgs = len([n for n in os.listdir(images) if not n.startswith(".")])
+    n_imgs = sum(1 for _, _, fs in os.walk(images) for n in fs if not n.startswith("."))
     summary = {"mapper": mapper, "registered": rec.num_reg_images(), "images": n_imgs,
                "points": rec.num_points3D(), "meanReprojErrorPx": round(float(rec.compute_mean_reprojection_error()), 3),
                "seconds": {"extract": round(t_ext, 1), "match": round(t_match, 1), "map": round(t_map, 1),
                            "total": round(time.time() - t0, 1)},
-               "gpu": bool(gpu), "undist": undist}
+               "gpu": bool(gpu), "undist": undist, "model": model_dir}
     return summary
 
 

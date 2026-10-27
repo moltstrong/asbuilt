@@ -48,6 +48,42 @@ def read_images_bin(path):
     return imgs
 
 
+def read_images_bin_points(path):
+    """name -> dict(R, t, camera_id, xy (n,2) pixel coords, pid (n,) int64 point3D ids, -1 = no 3D point)."""
+    imgs = {}
+    rec = np.dtype([("x", "<f8"), ("y", "<f8"), ("pid", "<i8")])
+    with open(path, "rb") as f:
+        (n,) = _read(f, "Q")
+        for _ in range(n):
+            iid, qw, qx, qy, qz, tx, ty, tz, cid = _read(f, "idddddddi")
+            name = b""
+            while True:
+                c = f.read(1)
+                if c == b"\0":
+                    break
+                name += c
+            (np2d,) = _read(f, "Q")
+            a = np.frombuffer(f.read(np2d * 24), dtype=rec, count=np2d)
+            imgs[name.decode()] = dict(id=iid, R=qvec2rotmat([qw, qx, qy, qz]), t=np.array([tx, ty, tz]),
+                                       camera_id=cid, xy=np.stack([a["x"], a["y"]], 1), pid=a["pid"].astype(np.int64))
+    return imgs
+
+
+def read_points3d_bin_ids(path):
+    """(ids (n,) int64, xyz (n,3)) of a points3D.bin."""
+    ids, xyz = [], []
+    with open(path, "rb") as f:
+        (n,) = _read(f, "Q")
+        for _ in range(n):
+            (pid,) = _read(f, "Q")
+            ids.append(pid)
+            xyz.append(_read(f, "ddd"))
+            f.seek(3 + 8, 1)  # rgb, error
+            (tl,) = _read(f, "Q")
+            f.seek(8 * tl, 1)
+    return np.array(ids, np.int64), np.array(xyz, float).reshape(-1, 3)
+
+
 def read_points3d_bin(path):
     xyz, rgb, err, track = [], [], [], []
     with open(path, "rb") as f:

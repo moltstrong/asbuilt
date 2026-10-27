@@ -30,7 +30,7 @@ struct CapabilitiesView: View {
                             detail: caps.objectCaptureBlocker ?? "Ready: guided 3D capture of equipment, fixtures, damage")
                         Divider()
                         row("On-device 3D reconstruction", ok: caps.onDeviceReconstruction,
-                            detail: caps.onDeviceReconstruction ? "model.usdz is built on the phone (with automatic retries)" : "Photos are kept; reconstruct on a Mac")
+                            detail: caps.onDeviceReconstruction ? "model.usdz is built on the phone (with automatic retries)" : "Photos are kept; the cloud builds the model")
                         Divider()
                         row("LiDAR Mesh scan", ok: caps.meshScanSupported,
                             detail: caps.meshScanBlocker ?? (caps.meshClassification
@@ -122,7 +122,7 @@ struct ResolutionGuide: View {
         Mode(name: "Detail scan", icon: "viewfinder", resolves: "about 3-5 mm within 1 m",
              detail: "Fuses many LiDAR depth frames into 4 mm voxels. Fine shapes appear after several passes; absolute accuracy is still about 1 cm."),
         Mode(name: "Object Capture", icon: "cube", resolves: "phone: reduced detail",
-             detail: "On-phone builds use Apple's reduced detail. Export the photos for a Mac build: about 1 mm on small textured objects."),
+             detail: "On-phone builds use Apple's reduced detail. The cloud then rebuilds every object scan at full detail (250k triangles, 8K texture) and sends it back."),
         Mode(name: "Measure", icon: "ruler", resolves: "about ±1 cm, better after tape calibration",
              detail: "Each point is the median of about 20 depth samples; the ± comes from their spread."),
     ]

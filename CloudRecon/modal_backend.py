@@ -1,7 +1,8 @@
-"""Backend that runs builds as Modal GPU function calls (used by cloud_server.CloudWorker inside the API container).
+"""Backend that runs builds as Modal function calls (used by cloud_server.CloudWorker inside the API container).
+The build function is $ASBUILT_BUILD_FUNCTION: "build_cpu" (OpenMVS, default) or "build_gpu" (optional splat path).
 
 Data flow (no big payloads through function arguments):
-  API container                         GPU container (modal_app.build_gpu)
+  API container                         build container (modal_app.build_cpu)
   /data volume: jobs/<id>/input.zip ---> reads it from the same "asbuilt-data" volume (after .reload())
   modal.Dict "asbuilt-status"[<id>] <--- {status, logTail} every ~2 s
   /data volume: jobs/<id>/out/*  <------ writes outputs there, then .commit()
@@ -19,14 +20,14 @@ class ModalBackend:
         self.data_root = data_root
         self.volume = modal.Volume.from_name(os.environ.get("ASBUILT_VOLUME", "asbuilt-data"))
         self.status = modal.Dict.from_name(os.environ.get("ASBUILT_STATUS_DICT", "asbuilt-status"), create_if_missing=True)
-        self.fn = modal.Function.from_name(self.APP_NAME, "build_gpu")
+        self.fn = modal.Function.from_name(self.APP_NAME, os.environ.get("ASBUILT_BUILD_FUNCTION", "build_cpu"))
 
     def _rel(self, path):
         return os.path.relpath(path, self.data_root)
 
     def spawn(self, job, input_zip, out_dir, status_path):
         from cloud_server import build_options
-        self.volume.commit()  # make input.zip visible to the GPU container
+        self.volume.commit()  # make input.zip visible to the build container
         call = self.fn.spawn(job["jobID"], build_options(job), self._rel(input_zip))
         return call.object_id
 
@@ -53,7 +54,7 @@ class ModalBackend:
         self.modal.FunctionCall.from_id(call_id).cancel(terminate_containers=True)
 
     def fetch_outputs(self, job, out_dir):
-        """Copy results/<id>/out (written + committed by the GPU container) into jobs/<id>/out."""
+        """Copy results/<id>/out (written + committed by the build container) into jobs/<id>/out."""
         import shutil
         import time
         jid = job["jobID"]

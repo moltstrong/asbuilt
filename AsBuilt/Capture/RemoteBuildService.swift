@@ -4,11 +4,11 @@ import AsBuiltCore
 import UIKit
 #endif
 
-/// Full-detail Object Capture builds on the owner's Mac (MacRecon/API.md, asbuilt-recon v1).
+/// Full-detail Object Capture builds in the cloud (asbuilt-recon v1, MacRecon/API.md; CloudRecon on Modal).
 ///
-/// After an Object Capture finishes, the photos are zipped, cut into chunks and uploaded to the Mac;
-/// the Mac runs PhotogrammetrySession at the most detail Apple allows (250k triangles, 8K photo
-/// texture + normal map) and the phone downloads `model-full.usdz` into the capture, where it
+/// After an Object Capture finishes, the photos are zipped, cut into chunks and uploaded to the cloud
+/// build server (the same v1 API the Mac server spoke); it builds a 250k-triangle, 8K-texture model
+/// and the phone downloads `model-full.usdz` into the capture, where it
 /// replaces the on-device preview in the 3D tab. Everything resumes from the IDs persisted in the
 /// capture record (`Capture.remoteBuild`): kill the app, lose the network, or change the tunnel URL
 /// and the next launch / foreground carries on where it stopped. Nothing here throws to the UI.
@@ -102,7 +102,7 @@ final class RemoteBuildService: ObservableObject {
 
     func isRunning(_ captureID: UUID) -> Bool { runs[captureID] != nil }
 
-    /// Starts (or resumes) the Mac build of an Object Capture. `restart` throws away a failed,
+    /// Starts (or resumes) the cloud build of an Object Capture. `restart` throws away a failed,
     /// cancelled or finished build and sends the photos again.
     func start(job jobID: UUID, capture captureID: UUID, restart: Bool = false) {
         guard config != nil, let store, let capture = store.capture(job: jobID, capture: captureID),
@@ -119,6 +119,8 @@ final class RemoteBuildService: ObservableObject {
         if capture.remoteBuild == nil {
             persist(RemoteBuild(photoCount: capture.imageCount), job: jobID, capture: captureID)
         }
+        // The cloud can't text like the Mac did: AsBuilt posts "model ready" itself (ReconReadyNotifier).
+        ReconReadyNotifier.shared.requestPermission()
         runs[captureID] = Task { [weak self] in
             await self?.run(job: jobID, capture: captureID)
             self?.runs[captureID] = nil
@@ -137,13 +139,28 @@ final class RemoteBuildService: ObservableObject {
         build.finishedAt = Date()
         persist(build, job: jobID, capture: captureID)
         Self.removeWorkDirectory(captureID)
-        // Free the Mac's queue and disk; best effort.
+        // Free the server's queue and disk; best effort.
         if let config, let base = resolvedBase ?? config.baseURL {
             let key = config.apiKey
             let s = session
             Task.detached {
                 if let uploadID { _ = try? await s.data(for: ReconRequests.deleteUpload(base: base, key: key, uploadID: uploadID)) }
                 if let remoteJob { _ = try? await s.data(for: ReconRequests.deleteJob(base: base, key: key, jobID: remoteJob)) }
+            }
+        }
+    }
+
+    /// AsBuilt is going to the background: ask iOS to check each running cloud build later on its own, so the
+    /// "model ready" notification arrives while the phone is in a pocket.
+    func scheduleReadyChecks() {
+        guard let config, let store, let base = resolvedBase ?? config.baseURL else { return }
+        for job in store.jobs {
+            for capture in job.captures where capture.kind == .object {
+                guard let b = capture.remoteBuild, let remoteJob = b.jobID,
+                      b.phase == .queued || b.phase == .building || b.phase == .waitingForMac else { continue }
+                ReconReadyNotifier.shared.scheduleCheck(jobID: remoteJob, title: capture.title,
+                                                        request: ReconRequests.job(base: base, key: config.apiKey, jobID: remoteJob),
+                                                        after: ReconStatusCheck.nextDelay(eta: b.etaSeconds))
             }
         }
     }
@@ -168,7 +185,7 @@ final class RemoteBuildService: ObservableObject {
         #if canImport(UIKit)
         // Keep going for the extra ~30 s iOS allows when the user locks the phone mid-upload.
         var bgTask = UIBackgroundTaskIdentifier.invalid
-        bgTask = UIApplication.shared.beginBackgroundTask(withName: "Mac build") {
+        bgTask = UIApplication.shared.beginBackgroundTask(withName: "Cloud build") {
             UIApplication.shared.endBackgroundTask(bgTask)
             bgTask = .invalid
         }
@@ -202,14 +219,14 @@ final class RemoteBuildService: ObservableObject {
             } catch let api as ReconAPIError where api.code == "unauthorized" {
                 guard var b = current(jobID, captureID) else { return }
                 b.phase = .failed
-                b.message = "This copy of AsBuilt has the wrong key for your Mac's build server."
+                b.message = "This copy of AsBuilt has the wrong key for the cloud build server."
                 b.finishedAt = Date()
                 persist(b, job: jobID, capture: captureID)
                 return
             } catch let api as ReconAPIError where api.code == "upload_too_large" {
                 guard var b = current(jobID, captureID) else { return }
                 b.phase = .failed
-                b.message = "This capture is too large for the Mac build (8 GB max)."
+                b.message = "This capture is too large for the cloud build (8 GB max)."
                 b.finishedAt = Date()
                 persist(b, job: jobID, capture: captureID)
                 return
@@ -327,7 +344,7 @@ final class RemoteBuildService: ObservableObject {
                         group.cancelAll()
                         throw Offline(message: (error as? URLError)?.code == .notConnectedToInternet
                                       ? "This iPhone is offline. AsBuilt keeps trying."
-                                      : "The connection to your Mac keeps dropping. AsBuilt keeps trying.")
+                                      : "The connection to the cloud keeps dropping. AsBuilt keeps trying.")
                     }
                     try await Task.sleep(nanoseconds: UInt64(min(16, 1 << consecutiveFailures)) * 1_000_000_000)
                     launch(chunk)
@@ -418,21 +435,21 @@ final class RemoteBuildService: ObservableObject {
         return build
     }
 
-    /// Polls the Mac every 5 s until the model is ready or the build failed.
+    /// Polls the server every 5 s until the model is ready or the build failed.
     private func waitForMac(_ start: RemoteBuild, base: URL, key: String, job jobID: UUID, capture captureID: UUID) async throws -> RemoteBuild {
         guard let remoteJob = start.jobID else { throw Offline() }
         while true {
             try Task.checkCancellation()
             let (data, code) = try await send(ReconRequests.job(base: base, key: key, jobID: remoteJob))
             if code == 404 {
-                // Job expired on the Mac (7 days) before we downloaded it: build again from the photos.
+                // Job expired on the server (7 days) before we downloaded it: build again from the photos.
                 guard var b = current(jobID, captureID) else { throw CancellationError() }
                 b.jobID = nil
                 b.uploadID = nil
                 b.receivedChunks = []
                 Self.removeWorkDirectory(captureID)
                 persist(b, job: jobID, capture: captureID)
-                throw Offline(message: "Your Mac no longer had this build. Sending the photos again.")
+                throw Offline(message: "The cloud no longer had this build. Sending the photos again.")
             }
             guard code == 200, let job = try? JSONDecoder().decode(ReconJob.self, from: data) else { try fail(data, code); throw Offline() }
             guard var b = current(jobID, captureID), b.isActive else { throw CancellationError() }
@@ -440,7 +457,19 @@ final class RemoteBuildService: ObservableObject {
             b.failureCount = 0
             if job.state != "failed" { b.message = nil }
             persist(b, job: jobID, capture: captureID)
+            if job.state == "failed" {
+                ReconReadyNotifier.shared.cancelChecks(jobID: remoteJob)
+                ReconReadyNotifier.shared.notify(jobID: remoteJob, title: captureTitle(jobID, captureID), ready: false, message: b.message)
+            }
             if job.state == "done" || job.state == "failed" { return b }
+            #if canImport(UIKit)
+            if UIApplication.shared.applicationState == .background {
+                // About to be suspended: iOS checks again on its own and wakes AsBuilt with the answer.
+                ReconReadyNotifier.shared.scheduleCheck(jobID: remoteJob, title: captureTitle(jobID, captureID),
+                                                        request: ReconRequests.job(base: base, key: key, jobID: remoteJob),
+                                                        after: ReconStatusCheck.nextDelay(eta: job.etaSeconds))
+            }
+            #endif
             try await Task.sleep(nanoseconds: 5_000_000_000)
         }
     }
@@ -492,7 +521,7 @@ final class RemoteBuildService: ObservableObject {
         done.chunks = nil
         persist(done, job: jobID, capture: captureID)
         if var capture = store.capture(job: jobID, capture: captureID), capture.status != .complete {
-            // The Mac model also rescues captures whose on-device build failed.
+            // The cloud model also rescues captures whose on-device build failed.
             capture.status = .complete
             capture.statusMessage = nil
             store.updateCapture(capture, in: jobID)
@@ -501,7 +530,9 @@ final class RemoteBuildService: ObservableObject {
         #if canImport(UIKit)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         #endif
-        // Free the Mac's disk; the model now lives on the phone.
+        ReconReadyNotifier.shared.cancelChecks(jobID: remoteJob)
+        ReconReadyNotifier.shared.notify(jobID: remoteJob, title: captureTitle(jobID, captureID), ready: true)
+        // Free the server's disk; the model now lives on the phone.
         let s = session
         Task.detached { _ = try? await s.data(for: ReconRequests.deleteJob(base: base, key: key, jobID: remoteJob)) }
     }
@@ -538,7 +569,7 @@ final class RemoteBuildService: ObservableObject {
 
     // MARK: - Diagnostics
 
-    /// Best-effort report to the Mac's log (never blocks, never throws, never includes the key).
+    /// Best-effort report to the server's log (never blocks, never throws, never includes the key).
     private func diagnose(_ captureID: UUID, uploadID: String?, event: String, build: RemoteBuild?, message: String? = nil,
                           error: NSError? = nil, chunk: Int? = nil) {
         guard let config, let base = resolvedBase ?? config.baseURL else { return }
@@ -589,10 +620,10 @@ final class RemoteBuildService: ObservableObject {
         throw Offline()
     }
 
-    /// Discovery first (the tunnel URL changes when the Mac restarts), then the URL baked into the build.
+    /// Discovery first (the gist names the current server: the cloud), then the URL baked into the build.
     private func baseURL() async throws -> URL {
         if let resolvedBase { return resolvedBase }
-        guard let config else { throw Fatal(message: "Mac builds aren't set up in this copy of AsBuilt.") }
+        guard let config else { throw Fatal(message: "Cloud builds aren't set up in this copy of AsBuilt.") }
         var candidates: [URL] = []
         if let discovery = config.discoveryURL {
             var r = URLRequest(url: discovery, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
@@ -612,22 +643,26 @@ final class RemoteBuildService: ObservableObject {
                 return candidate
             }
         }
-        throw Offline(message: "Your Mac isn't reachable right now. AsBuilt keeps trying.")
+        throw Offline(message: "The cloud isn't reachable right now. AsBuilt keeps trying.")
     }
 
     private static func waitingMessage(_ error: Error) -> String {
         if let offline = error as? Offline, let m = offline.message { return m }
         if let api = error as? ReconAPIError {
             switch api.code {
-            case "insufficient_storage": return "Your Mac is out of disk space. Free some up; AsBuilt keeps trying."
-            case "rate_limited": return "Your Mac asked AsBuilt to slow down. Trying again shortly."
-            default: return api.message ?? "Your Mac had a problem (\(api.code)). Trying again."
+            case "insufficient_storage": return "The cloud is out of space right now. AsBuilt keeps trying."
+            case "rate_limited": return "The cloud asked AsBuilt to slow down. Trying again shortly."
+            default: return api.message ?? "The cloud had a problem (\(api.code)). Trying again."
             }
         }
-        return "Your Mac isn't reachable right now. AsBuilt keeps trying."
+        return "The cloud isn't reachable right now. AsBuilt keeps trying."
     }
 
     // MARK: - State
+
+    private func captureTitle(_ jobID: UUID, _ captureID: UUID) -> String {
+        store?.capture(job: jobID, capture: captureID)?.title ?? ""
+    }
 
     private func current(_ jobID: UUID, _ captureID: UUID) -> RemoteBuild? {
         store?.capture(job: jobID, capture: captureID)?.remoteBuild

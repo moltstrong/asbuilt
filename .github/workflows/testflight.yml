@@ -83,16 +83,16 @@ jobs:
           test "$(plutil -extract ITSAppUsesNonExemptEncryption raw AsBuilt/Info.plist)" = "false"
           plutil -extract NSCameraUsageDescription raw AsBuilt/Info.plist
 
-      - name: Configure Mac full-detail builds (Info.plist, not committed)
+      - name: Configure cloud full-detail builds (Info.plist, not committed)
         env:
           RECON_API_KEY: ${{ secrets.RECON_API_KEY }}
           RECON_BASE_URL: ${{ secrets.RECON_BASE_URL }}
           RECON_DISCOVERY_URL: ${{ secrets.RECON_DISCOVERY_URL }}
         run: |
           # Written into the runner's working copy only (never into a log or the repo). Without the
-          # secrets the app simply hides "Build full detail on my Mac".
+          # secrets the app simply hides "Build full detail in the cloud".
           if [ -z "$RECON_API_KEY" ] || { [ -z "$RECON_BASE_URL" ] && [ -z "$RECON_DISCOVERY_URL" ]; }; then
-            echo "::warning title=Mac builds off::RECON_API_KEY / RECON_BASE_URL / RECON_DISCOVERY_URL not set; Mac full-detail builds disabled in this build."
+            echo "::warning title=Cloud builds off::RECON_API_KEY / RECON_BASE_URL / RECON_DISCOVERY_URL not set; cloud full-detail builds disabled in this build."
             exit 0
           fi
           for k in ReconAPIKey ReconBaseURL ReconDiscoveryURL; do plutil -remove "$k" AsBuilt/Info.plist 2>/dev/null || true; done
@@ -100,7 +100,7 @@ jobs:
           [ -n "$RECON_BASE_URL" ] && plutil -insert ReconBaseURL -string "$RECON_BASE_URL" AsBuilt/Info.plist
           [ -n "$RECON_DISCOVERY_URL" ] && plutil -insert ReconDiscoveryURL -string "$RECON_DISCOVERY_URL" AsBuilt/Info.plist
           plutil -lint AsBuilt/Info.plist
-          echo "Mac builds configured: key ${#RECON_API_KEY} chars, base URL set: $([ -n "$RECON_BASE_URL" ] && echo yes || echo no), discovery set: $([ -n "$RECON_DISCOVERY_URL" ] && echo yes || echo no)"
+          echo "Cloud builds configured: key ${#RECON_API_KEY} chars, base URL set: $([ -n "$RECON_BASE_URL" ] && echo yes || echo no), discovery set: $([ -n "$RECON_DISCOVERY_URL" ] && echo yes || echo no)"
 
       - name: Archive (Release, automatic signing)
         run: |
@@ -125,7 +125,7 @@ jobs:
           echo "Bundle ID:      $(plutil -extract CFBundleIdentifier raw "$APP/Info.plist")"
           echo "Version:        $(plutil -extract CFBundleShortVersionString raw "$APP/Info.plist")"
           echo "Build number:   $(plutil -extract CFBundleVersion raw "$APP/Info.plist")"
-          if plutil -extract ReconAPIKey raw "$APP/Info.plist" >/dev/null 2>&1; then echo "Mac builds:     configured"; else echo "Mac builds:     off"; fi
+          if plutil -extract ReconAPIKey raw "$APP/Info.plist" >/dev/null 2>&1; then echo "Cloud builds:   configured"; else echo "Cloud builds:   off"; fi
 
       - name: Write ExportOptions.plist
         run: |

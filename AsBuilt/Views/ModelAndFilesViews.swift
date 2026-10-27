@@ -33,7 +33,7 @@ struct ModelTabView: View {
                         .overlay(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous).stroke(Theme.hairline, lineWidth: 0.5))
                         .accessibilityIdentifier("modelView")
                     Text(url.lastPathComponent == CaptureFile.fullModelUSDZ
-                         ? "Full-detail model from your Mac. Drag to orbit, pinch to zoom."
+                         ? "Full-detail model from the cloud. Drag to orbit, pinch to zoom."
                          : "Drag to orbit, pinch to zoom.")
                         .font(.footnote).foregroundStyle(.secondary)
                     RemoteBuildCard(jobID: jobID, capture: capture)
@@ -91,7 +91,7 @@ struct ModelTabView: View {
                                 .buttonStyle(BigButtonStyle(filled: false))
                                 .accessibilityIdentifier("meshInsteadButton")
                             }
-                            Text("The photos and reconstruction-log.txt are in the Files tab. On a Mac, drop the Images folder into Reality Composer Pro (or run PhotogrammetrySession at .full / .raw detail) for a higher-detail model, then import the USDZ back here.")
+                            Text("The photos and reconstruction-log.txt are in the Files tab. The cloud build below makes the full-detail model from the same photos.")
                                 .font(.footnote).multilineTextAlignment(.center).foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -445,7 +445,7 @@ struct FileRow: View {
     }
 }
 
-/// "Export photos for full-detail Mac build": streams the Images folder (+ log) into a STORE zip
+/// "Export photos": streams the Images folder (+ log) into a STORE zip
 /// off the main thread, then offers the share sheet (AirDrop, Files, iCloud Drive).
 struct PhotoExportCard: View {
     let jobID: UUID
@@ -459,8 +459,8 @@ struct PhotoExportCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Full-detail Mac build").font(.headline)
-            Text("The phone builds Apple's reduced detail. Send all \(capture.imageCount ?? 0) photos to a Mac (Reality Composer Pro or PhotogrammetrySession, detail Full/Raw) for about 1 mm detail on small textured objects.")
+            Text("Export the photos").font(.headline)
+            Text("The cloud already builds the full-detail model. To build your own, share all \(capture.imageCount ?? 0) photos as a zip (Reality Composer Pro, PhotogrammetrySession or any photogrammetry tool).")
                 .font(.subheadline).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let progress {
@@ -469,7 +469,7 @@ struct PhotoExportCard: View {
                 Button {
                     export()
                 } label: {
-                    Label("Export photos for full-detail Mac build", systemImage: "photo.stack")
+                    Label("Export photos (zip)", systemImage: "photo.stack")
                 }
                 .buttonStyle(BigButtonStyle(filled: false))
                 .accessibilityIdentifier("exportPhotosButton")

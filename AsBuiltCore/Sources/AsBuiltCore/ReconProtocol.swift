@@ -614,14 +614,14 @@ public struct RemoteBuild: Codable, Hashable, Sendable {
     public var headline: String {
         switch phase {
         case .preparing: return "Packing photos"
-        case .uploading: return "Sending photos to your Mac"
-        case .waitingForMac: return "Waiting for your Mac"
-        case .queued: return "On your Mac, next in line"
+        case .uploading: return "Sending photos to the cloud"
+        case .waitingForMac: return "Waiting for the cloud"
+        case .queued: return "In the cloud, next in line"
         case .building: return "Building full detail"
         case .downloading: return "Bringing it to your iPhone"
         case .done: return "Full-detail model ready"
-        case .failed: return "Mac build didn't finish"
-        case .cancelled: return "Mac build cancelled"
+        case .failed: return "Cloud build didn't finish"
+        case .cancelled: return "Cloud build cancelled"
         }
     }
 
@@ -636,7 +636,7 @@ public struct RemoteBuild: Codable, Hashable, Sendable {
             guard let total = totalBytes else { return "Starting upload" }
             return "\(ReconFormat.bytes(min(total, uploadedBytes + max(0, inFlightBytes)))) of \(ReconFormat.bytes(total))"
         case .waitingForMac:
-            return message ?? "Your Mac isn't reachable right now. AsBuilt keeps trying."
+            return message ?? "The cloud isn't reachable right now. AsBuilt keeps trying."
         case .queued:
             if let q = queuePosition, q > 1 { return "\(q - 1) build\(q == 2 ? "" : "s") ahead of yours" }
             return "Starting in a moment"
@@ -691,7 +691,7 @@ public struct RemoteBuild: Codable, Hashable, Sendable {
         case "failed":
             phase = .failed
             finishedAt = now
-            message = job.error?.message ?? job.message ?? "Your Mac couldn't build this model."
+            message = job.error?.message ?? job.message ?? "The cloud couldn't build this model."
         default:
             break
         }

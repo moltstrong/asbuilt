@@ -38,8 +38,9 @@ Screenshots come from the iOS Simulator in CI (`scripts/capture-screenshots.sh`)
     - flooring sq ft = floor area x 1.10
   - Imperial (ft-in) is the default. Switch to metric from the units button on any plan screen.
 - **Object capture (RealityKit Object Capture).** Guided photo capture of equipment, fixtures or damage. The
-  phone then reconstructs `model.usdz` on-device with `PhotogrammetrySession`. The `Images/` folder is kept so
-  the office can rebuild the model at higher detail on a Mac. You can also import a USDZ made elsewhere.
+  phone then reconstructs `model.usdz` on-device with `PhotogrammetrySession` as a quick preview, uploads the
+  `Images/` folder to the cloud build server, and swaps in the full-detail model (250k triangles, 8K texture) when it
+  comes back. You can also import a USDZ made elsewhere.
 - **Viewing and sharing.**
   - Interactive 3D preview (SceneKit) plus **AR Quick Look**, which places the model in the room at true scale and measures it.
   - 2D plan view you can pinch to zoom, with dimensions and layer toggles.
@@ -136,7 +137,14 @@ To regenerate the project after adding files: `brew install xcodegen && xcodegen
 - **PDF (`floorplan.pdf`):** page 1 is the plan sheet with a title block, page 2 is the takeoff, ready to print or attach to a bid.
 - **JSON:** `room.json` is Apple's `CapturedRoom` (Codable). `plan.json` is AsBuilt's own plan model, in meters.
 
-## Full-detail models on a Mac (`MacRecon/`)
+## Full-detail models in the cloud (`CloudRecon/`)
+
+Object scans upload to a cloud build server on Modal (CPU only: pycolmap SfM + OpenMVS + CloudRecon's photo bake,
+metric scale from the iPhone's LiDAR depth). It speaks the same v1 API the Mac server did, so the apps only needed a
+new address (the discovery gist). About 20 minutes and $0.35 for a 41-photo scan. See
+[CloudRecon/README.md](CloudRecon/README.md).
+
+## Full-detail models on a Mac (`MacRecon/`, retired as the build server)
 
 iPhones can only build Object Capture models at `.reduced` detail. `MacRecon/` is a standalone macOS command-line
 tool, `asbuilt-recon`, that rebuilds a capture's exported photos at `full`, `raw` or `custom` (8K textures) detail

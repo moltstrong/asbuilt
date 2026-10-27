@@ -1,11 +1,13 @@
 """CloudRecon tests: run on a Mac/Linux box without a GPU (pytest CloudRecon/tests -q).
 
-* stage tests: TSDF on a synthetic sphere, USDZ export validated by usd-core's validators,
-* pipeline test: fake GPU stages (synthetic SfM + splat) through the *real* mesh/texture/export code,
+* stage tests: TSDF on a synthetic sphere, USDZ export validated by usd-core's validators, the OpenMVS-mesh crop,
+  LiDAR metric scale (decoding search + robust ratio) on synthetic depth maps, HEIC without depth -> no scale,
+* pipeline tests: fake heavy stages (synthetic SfM + OpenMVS mesh / splat) through the *real* crop, bake,
+  scale/orientation and export code (default OpenMVS path and the optional splat path),
 * HTTP test: cloud_server (recon_server.py's handler + CloudWorker + LocalBackend 'fake') driven through the
   asbuilt-recon v1 flow with stdlib http.client: health, auth 401, create upload, chunk PUT with sha,
   resume (GET upload), complete, job polling with stage/progress, Range download + sha256, model.glb
-  conversion (recon_server.obj_to_glb), splat.ply download, job list, delete,
+  conversion (recon_server.obj_to_glb), no splat.ply on the default OpenMVS path, job list, delete,
 * gpu_entry test: the Modal function body with a dict as the status channel,
 * modal_app import test: the deployment file builds its App/functions locally (no login, no network).
 """
@@ -120,13 +122,43 @@ def test_clean_unwrap_bake_export_usdz(tmp_path):
     assert open(objp).read().count("\nf ") == len(F2)
 
 
-def test_pipeline_with_fake_gpu_stages(tmp_path):
+def test_pipeline_openmvs_path_with_fake_stages(tmp_path):
     from asbuilt_cloud import pipeline, runner
     z = make_zip(str(tmp_path / "in.zip"))
     out = str(tmp_path / "job" / "out")
     st = str(tmp_path / "job" / "status.json")
     r = pipeline.build(z, out, detail="phone", status_file=st, stages=runner.FakeStages(), echo=False,
-                       max_side=400, steps=10, tris_override=4000, texture_px_override=512)
+                       max_side=400, tris_override=4000, texture_px_override=512, mesher="openmvs")
+    assert r["ok"], r
+    assert r["mesher"] == "openmvs" and 2000 < r["polygons"] <= 4000
+    for name in ("model.usdz", "thumbnail.png", "recon-log.txt", "result.json", "obj/model.obj"):
+        assert os.path.isfile(os.path.join(out, name)), name
+    assert not os.path.exists(os.path.join(out, "splat.ply"))
+    s = json.load(open(st))
+    assert s["state"] == "done" and s["fraction"] == 1.0
+    assert r["usdcheckerPassed"] is True
+    # JPEGs carry no LiDAR depth: no metric claim, sized as if shot from ~1 m, Y-up with the object at the origin
+    assert r["scaleSource"] == "none" and r["metersPerUnit"] == 1.0
+    assert r["openmvs"]["crop"]["componentsKept"] == 1  # the far-away speck was cropped
+    V = np.array([[float(x) for x in l.split()[1:4]] for l in open(os.path.join(out, "obj", "model.obj"))
+                  if l.startswith("v ")])
+    ext = V.max(0) - V.min(0)
+    assert abs(V[:, 1].min()) < 0.02 * ext.max()       # resting on y = 0
+    assert np.all(np.abs(V[:, [0, 2]].mean(0)) < 0.1 * ext.max())  # centred over the origin
+    # unit sphere seen from ~3.3 units -> scaled so the cameras are ~1 m away: diameter ~0.6 m
+    assert 0.4 < ext.max() < 0.9, ext
+    assert np.allclose(r["dimensionsMeters"], ext, atol=1e-3)
+    log = open(os.path.join(out, "recon-log.txt")).read()
+    assert "scale: none" in log and "stage seconds" in log
+
+
+def test_pipeline_splat_path_with_fake_gpu_stages(tmp_path):
+    from asbuilt_cloud import pipeline, runner
+    z = make_zip(str(tmp_path / "in.zip"))
+    out = str(tmp_path / "job" / "out")
+    st = str(tmp_path / "job" / "status.json")
+    r = pipeline.build(z, out, detail="phone", status_file=st, stages=runner.FakeStages(), echo=False,
+                       max_side=400, steps=10, tris_override=4000, texture_px_override=512, mesher="splat")
     assert r["ok"], r
     assert 2000 < r["polygons"] <= 4000
     for name in ("model.usdz", "splat.ply", "thumbnail.png", "recon-log.txt", "result.json"):
@@ -135,6 +167,140 @@ def test_pipeline_with_fake_gpu_stages(tmp_path):
     assert s["state"] == "done" and s["fraction"] == 1.0
     assert r["usdcheckerPassed"] is True
     assert r["splat"]["gaussians"] == 20000
+
+
+def test_openmvs_crop_keeps_object_drops_background():
+    from asbuilt_cloud import openmvs_mesh, runner
+    cams = sphere_cams()
+    V, F = runner.icosphere(3)
+    fv, ff = runner.icosphere(0)  # 20 faces: < 5 % of the object's 1280
+    V = np.concatenate([V, fv * 0.1 + [30.0, 0, 0], fv * 0.02 + [0, 0, 1.5]])  # far debris + a nearby fleck
+    F = np.concatenate([F, ff + len(runner.icosphere(3)[0]), ff + len(runner.icosphere(3)[0]) + len(fv)])
+    V2, F2, info = openmvs_mesh.crop(V, F, cams, min_frac=0.1, radius_factor=1.6)
+    assert info["componentsKept"] == 1 and len(F2) == len(runner.icosphere(3)[1])
+    assert np.allclose(np.linalg.norm(V2, axis=1), 1.0)
+
+
+def test_camera_up_ignores_pitch_on_a_one_sided_capture():
+    from asbuilt_cloud import colmap_io, pipeline
+    true_up = np.array([0.2, 1.0, -0.1]); true_up /= np.linalg.norm(true_up)
+    a = np.cross(true_up, [0, 0, 1.0]); a /= np.linalg.norm(a); b = np.cross(true_up, a)
+    cams = []
+    for az in np.linspace(-1.4, 1.4, 15):  # half ring in front of the object, all looking down ~35 deg
+        horiz = np.cos(az) * a + np.sin(az) * b
+        C = 2.0 * horiz + 1.4 * true_up
+        z = -C / np.linalg.norm(C)
+        x = np.cross(-true_up, z); x /= np.linalg.norm(x)   # level camera: x horizontal
+        y = np.cross(z, x)
+        R = np.stack([x, y, z])
+        cams.append(colmap_io.Camera("c", R, -R @ C, 100, 100, 50, 50, 100, 100))
+    up, source = pipeline.camera_up(cams)
+    mean_up = np.mean([c.R.T @ np.array([0, -1.0, 0]) for c in cams], 0); mean_up /= np.linalg.norm(mean_up)
+    err = np.degrees(np.arccos(np.clip(up @ true_up, -1, 1)))
+    bias = np.degrees(np.arccos(np.clip(mean_up @ true_up, -1, 1)))
+    assert source == "camera x axes" and err < 0.5 and bias > 10, (err, bias)
+
+
+def test_openmvs_progress_is_monotonic_across_phases():
+    from asbuilt_cloud.openmvs_mesh import PhaseProgress
+    now = [0.0]
+    seen = []
+    pp = PhaseProgress(seen.append, expected_seconds=100, main=r"depth-?maps?", clock=lambda: now[0])
+    script = [(1, "05:15:21 [App     ] Selected images (100%, 1s)"),             # quick phase: no jump to 100 %
+              (2, "05:15:22 [App     ] Selecting images for dense reconstruction..."),
+              (10, "05:15:30 [App     ] Estimated depth-maps 10 (25%, 10s, ETA 30s)..."),
+              (40, "05:16:00 [App     ] Estimated depth-maps 41 (60%, 40s)"),
+              (41, "05:16:01 [App     ] Filtered depth-maps 3 (7.3%, 1s, ETA 9s)..."),  # restarts at 7 %: ignored
+              (70, "05:16:30 [App     ] Fused depth-maps 20 (48.8%, 3s)..."),
+              (300, "05:20:00 [App     ] Fused depth-maps 41 (100%, 9s)")]
+    out = []
+    for t, line in script:
+        now[0] = t
+        out.append(pp.line(line))
+    assert out[1] is None and out[0] == 100.0
+    assert seen == sorted(seen) and seen[0] < 0.05          # the 1-second phase did not fill the bar
+    assert pp.last == pytest.approx(0.95)                   # capped until the program exits
+    assert any(abs(x - 0.6) < 1e-6 for x in seen)           # main-phase percentage drives it when ahead of time
+    assert pp.labels[:3] == ["Selected images", "Estimated depth-maps", "Filtered depth-maps"]
+
+
+def _synthetic_lidar(cams, true_mpu, rep="uniformZ", noise=0.01, rot=0, seed=0):
+    """Per-image LiDAR maps of the unit sphere scene in meters (scene units * true_mpu), 8-bit uniform Z with
+    z_near/z_far like Object Capture, and SfM observations at random sphere points."""
+    rng = np.random.default_rng(seed)
+    per = []
+    for c in cams:
+        d = sphere_depth(c) * true_mpu  # metric camera z
+        valid = d > 0
+        zn, zf = float(d[valid].min()) * 0.9, float(d[valid].max()) * 1.1
+        q = np.clip(np.round((d - zn) / (zf - zn) * 255), 1, 254)
+        q = np.where(valid, q, 0).astype(np.uint8)
+        if rep == "uniformZ-flipped":
+            q = np.where(valid, 255 - q, 0).astype(np.uint8)
+        dep = {"values": np.rot90(q, rot).astype(np.float32), "max": 255.0,
+               "meta": {"z_near": zn, "z_far": zf, "representation_type": 2}, "mode": "L",
+               "primary_size": (c.width, c.height)}
+        P = rng.normal(size=(400, 3)); P /= np.linalg.norm(P, axis=1, keepdims=True)
+        Xc = P @ c.R.T + c.t
+        u = c.fx * Xc[:, 0] / Xc[:, 2] + c.cx
+        v = c.fy * Xc[:, 1] / Xc[:, 2] + c.cy
+        vis = (P @ (c.center / np.linalg.norm(c.center)) > 0.3) & (u > 2) & (v > 2) & (u < c.width - 2) & (v < c.height - 2)
+        z = Xc[vis, 2] * (1 + noise * rng.normal(size=vis.sum()))
+        per.append({"depth": dep, "xy": np.stack([u[vis], v[vis]], 1), "z": z, "img_wh": (c.width, c.height)})
+    return per
+
+
+def test_lidar_scale_recovers_metric_scale():
+    from asbuilt_cloud import lidar_scale
+    cams = sphere_cams(W=192, H=256, f=200.0)  # portrait, like a decoded Object Capture HEIC
+    for true in (0.137, 2.5):
+        r = lidar_scale.estimate_scale(_synthetic_lidar(cams, true))
+        assert r["ok"], r
+        assert abs(r["metersPerUnit"] / true - 1) < 0.02, r
+        assert r["reading"] == "uniformZ" and r["rot90"] == 0 and r["mad"] < 0.03
+    # an encoder that stores near = 255 instead of near = 0 is found by the consistency search
+    r = lidar_scale.estimate_scale(_synthetic_lidar(cams, 0.5, rep="uniformZ-flipped"))
+    assert r["ok"] and r["reading"] == "uniformZ-flipped" and abs(r["metersPerUnit"] / 0.5 - 1) < 0.02, r
+    # depth grid stored 180 degrees rotated: found (sphere off-centre so the orientations are distinguishable)
+    for c in cams:
+        c.cx, c.cy = 0.62 * c.width, 0.6 * c.height
+    r = lidar_scale.estimate_scale(_synthetic_lidar(cams, 0.5))
+    assert r["ok"] and r["rot90"] == 0 and r["flip"] is False, r
+    r = lidar_scale.estimate_scale(_synthetic_lidar(cams, 0.5, rot=2))
+    assert r["ok"] and r["rot90"] == 2 and abs(r["metersPerUnit"] / 0.5 - 1) < 0.02, r
+
+
+def test_lidar_scale_refuses_without_range_or_with_inconsistent_depth():
+    from asbuilt_cloud import lidar_scale
+    cams = sphere_cams(W=192, H=256, f=200.0)
+    per = _synthetic_lidar(cams, 0.5)
+    for p in per:  # integer depth without z_near/z_far: relative only
+        p["depth"]["meta"] = {}
+    r = lidar_scale.estimate_scale(per)
+    assert not r["ok"]
+    per = _synthetic_lidar(cams, 0.5)
+    for k, p in enumerate(per):  # smooth depth that has nothing to do with the geometry (a tilted ramp)
+        h, w = p["depth"]["values"].shape
+        ramp = np.add.outer(np.linspace(1, 120, h), np.linspace(1, 130, w) * (1 if k % 2 else -1) + (130 if k % 2 == 0 else 0))
+        p["depth"]["values"] = np.clip(ramp, 1, 254).astype(np.float32)
+    r = lidar_scale.estimate_scale(per)
+    assert not r["ok"] and "spread" in r.get("reason", ""), r
+    r = lidar_scale.estimate_scale([{"depth": None, "xy": np.zeros((5, 2)), "z": np.ones(5), "img_wh": (10, 10)}] * 5)
+    assert not r["ok"] and "carry LiDAR depth" in r["reason"]
+
+
+def test_heic_without_depth_has_no_depth(tmp_path):
+    pillow_heif = pytest.importorskip("pillow_heif")
+    from PIL import Image
+    from asbuilt_cloud import lidar_scale, pipeline
+    pillow_heif.register_heif_opener()
+    src = tmp_path / "src"
+    src.mkdir()
+    p = str(src / "IMG_0001.HEIC")
+    Image.fromarray((np.random.default_rng(0).random((60, 80, 3)) * 255).astype("uint8")).save(p, format="HEIF")
+    assert lidar_scale.read_heic_depth(p) is None
+    names, sizes, mapping = pipeline.prepare_images(str(src), str(tmp_path / "out"), 2000, lambda *a: None)
+    assert names == ["IMG_0001.HEIC"] and mapping == {"IMG_0001.jpg": ("IMG_0001.HEIC", (80, 60))}
 
 
 def test_pipeline_failure_writes_result(tmp_path):
@@ -165,10 +331,13 @@ def test_modal_app_definition_imports():
     pytest.importorskip("modal")
     import importlib
     os.environ.pop("ASBUILT_GPU", None)
+    os.environ.pop("ASBUILT_ENABLE_SPLAT", None)
     m = importlib.import_module("modal_app")
     assert m.app.name == "asbuilt-recon"
-    assert hasattr(m, "api") and hasattr(m, "build_gpu")
-    assert m.GPU == "L40S"
+    assert hasattr(m, "api") and hasattr(m, "build_cpu")
+    assert not hasattr(m, "build_gpu")  # the splat GPU path is opt-in (ASBUILT_ENABLE_SPLAT=1)
+    assert m.BUILD_CPUS == 16 and m.BUILD_MEMORY_MB == 32768
+    assert m.OPENMVS_PATCH.is_file()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -268,9 +437,10 @@ def test_http_v1_flow(server, tmp_path):
     assert job["polygons"] and job["polygons"] <= 4000
     stored = app.store.load_job(jid)  # internal fields the v1 job view doesn't expose (same as the Mac)
     assert stored["usdcheckerPassed"] is True and stored["engine"] == "asbuilt-cloud"
-    assert stored["splatInfo"]["gaussians"] == 20000 and "gpuCallID" not in stored
+    assert "splatInfo" not in stored and "gpuCallID" not in stored
     names = {f["name"]: f for f in job["files"]}
-    assert {"model.usdz", "recon-log.txt", "thumbnail.png", "model.glb", "splat.ply"} <= set(names)
+    assert {"model.usdz", "recon-log.txt", "thumbnail.png", "model.glb"} <= set(names)
+    assert "splat.ply" not in names  # OpenMVS (default) builds have no splat
     assert "model-obj.zip" not in names  # obj=false: dropped even though the build made one for the GLB
     assert job["glbInfo"]["triangles"] == job["polygons"]
     assert stages, "no live stage was ever reported"
@@ -283,8 +453,6 @@ def test_http_v1_flow(server, tmp_path):
     assert st == 206 and hashlib.sha256(part + rest).hexdigest() == f["sha256"]
     st, glb, hd = c.req("GET", names["model.glb"]["url"], raw=True)
     assert st == 200 and glb[:4] == b"glTF" and hd["Content-Type"] == "model/gltf-binary"
-    st, ply, _ = c.req("GET", names["splat.ply"]["url"], raw=True)
-    assert st == 200 and ply.startswith(b"ply")
 
     st, lst = c.req("GET", "/v1/jobs?captureID=cap-1")
     assert st == 200 and [j["jobID"] for j in lst["jobs"]] == [jid]

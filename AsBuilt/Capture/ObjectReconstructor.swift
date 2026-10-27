@@ -77,7 +77,7 @@ final class ObjectReconstructor: ObservableObject {
             log.add("RESULT: PhotogrammetrySession is not supported on this device. No attempt made.")
             write(log, to: logURL)
             return Outcome(succeeded: false, attempts: 0,
-                           message: "This phone can't build 3D models from photos on device. The photos are saved; use LiDAR Mesh, or build it on a Mac.",
+                           message: "This phone can't build 3D models from photos on device. The photos are saved and the cloud builds the model.",
                            explanation: nil)
         }
         guard !imageFiles.isEmpty else {

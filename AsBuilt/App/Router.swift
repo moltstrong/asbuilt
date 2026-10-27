@@ -28,7 +28,7 @@ enum Route: Hashable {
     case measurements(UUID)
     /// Capture Coach HUD driven by synthetic metrics (CI screenshots; the Simulator has no AR).
     case coachPreview(String)
-    /// "Full detail on your Mac" progress card with synthetic states (CI screenshots).
+    /// "Full detail in the cloud" progress card with synthetic states (CI screenshots).
     case remoteBuildPreview(String)
 }
 

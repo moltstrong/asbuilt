@@ -2,11 +2,19 @@ import SwiftUI
 import UIKit
 import AsBuiltCore
 
-/// Receives background URLSession wake-ups (Mac build chunk uploads finishing while AsBuilt was
-/// suspended or killed) and hands iOS's completion handler to the upload service.
+/// Receives background URLSession wake-ups (cloud build chunk uploads, and "is the model ready?" checks,
+/// finishing while AsBuilt was suspended or killed) and hands iOS's completion handler to their owner.
 final class AsBuiltAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
+        if identifier == ReconReadyNotifier.sessionID {
+            // A "is the cloud model ready?" check finished while AsBuilt was suspended.
+            Task { @MainActor in
+                ReconReadyNotifier.shared.backgroundEventsCompletion = completionHandler
+                ReconReadyNotifier.shared.activate()
+            }
+            return
+        }
         guard identifier == RemoteBuildService.backgroundSessionID else {
             completionHandler()
             return
@@ -71,13 +79,15 @@ struct RootView: View {
                 }
         }
         .task {
-            // Mac full-detail builds pick up where they stopped (app killed, network lost, new tunnel URL).
+            // Cloud full-detail builds pick up where they stopped (app killed, network lost, server moved).
             RemoteBuildService.shared.attach(store)
             RemoteBuildService.shared.resumeActive()
+            ReconReadyNotifier.shared.activate()  // receive pending background "model ready?" checks
             await store.prepareDemoExports()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { RemoteBuildService.shared.resumeActive() }
+            if phase == .background { RemoteBuildService.shared.scheduleReadyChecks() }
         }
     }
 }

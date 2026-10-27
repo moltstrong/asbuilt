@@ -284,7 +284,7 @@ def e2e(a, c, base):
     size = os.path.getsize(zip_path)
     st, _, up = c.request("POST", "/v1/uploads", {"captureID": capture, "filename": os.path.basename(zip_path), "totalBytes": size,
                                                   "sha256": sha, "detail": a.detail, "texture": "8k", "obj": True,
-                                                  "title": a.title, "notify": True})
+                                                  "glb": bool(a.glb), "title": a.title, "notify": True})
     rep.check("create upload 201", st == 201, "%s chunks x %d MiB" % (up.get("chunkCount"), (up.get("chunkSize") or 0) >> 20))
     uid = up["uploadID"]
     cut_at = max(1, up["chunkCount"] // 2)
@@ -370,7 +370,7 @@ def e2e(a, c, base):
     rep.check("model.usdz sha256 matches job file list", got_sha == files["model.usdz"]["sha256"] and os.path.getsize(dest) == total,
               got_sha[:16])
     rep.data["download"] = {"bytes": total, "seconds": round(s1 + s2, 1), "throughputMBps": round(total / 1e6 / max(s1 + s2, 1e-3), 2)}
-    for name in ("recon-log.txt", "model-obj.zip"):
+    for name in ("recon-log.txt", "model-obj.zip") + (("model.glb", "thumbnail.png") if a.glb else ()):
         p = os.path.join(out, name)
         if os.path.exists(p):
             os.remove(p)
@@ -412,6 +412,7 @@ def main():
     ap.add_argument("--title", default="Monstree test")
     ap.add_argument("--detail", default="full")
     ap.add_argument("--small")
+    ap.add_argument("--glb", action="store_true", help="also ask for model.glb (what the Android app requests)")
     ap.add_argument("--restart-cmd")
     ap.add_argument("--out", default=os.path.join(os.getcwd(), "e2e-out"))
     a = ap.parse_args()

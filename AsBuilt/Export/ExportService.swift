@@ -179,9 +179,9 @@ enum ExportService {
             }
             let readme = """
             AsBuilt Object Capture photos: \(title)
-            Full-detail Mac build: open Reality Composer Pro > New Photogrammetry project and drop in the
-            Images folder (or run PhotogrammetrySession with detail .full or .raw). Import the resulting
-            USDZ back into the job with "Import USDZ model".
+            AsBuilt sends these photos to the cloud for the full-detail model automatically. To build one
+            yourself, open Reality Composer Pro > New Photogrammetry project and drop in the Images folder
+            (or run PhotogrammetrySession with detail .full or .raw), then import the USDZ with "Import USDZ model".
             """
             try writer.addData(Data(readme.utf8), path: "\(folder)/README.txt")
             try writer.finish()
