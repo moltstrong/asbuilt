@@ -48,7 +48,7 @@ class FakeStages(pipeline.Stages):
         img = np.where((disc > 0)[..., None], col, [0.5, 0.5, 0.5])
         return (img * 255).astype(np.uint8)
 
-    def sfm(self, images, work, log, use_gpu=None):
+    def sfm(self, images, work, log, use_gpu=None, sfm_images=None):
         from PIL import Image
         undist = os.path.join(work, "undist")
         os.makedirs(os.path.join(undist, "images"), exist_ok=True)

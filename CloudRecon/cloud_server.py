@@ -278,10 +278,15 @@ class CloudWorker(rs.Worker):
                 j["message"] = msg
                 j["error"] = {"code": "build_failed", "message": msg, "exitCode": 0 if ok else 1,
                               "technical": (result.get("errorTechnical") or "")[:2000]}
-            try:
-                os.remove(os.path.join(self.store.job_dir(jid), "input.zip"))
-            except OSError:
-                pass
+            # Successful builds don't need their photos any more. Failed ones keep input.zip (and out/recon-log.txt)
+            # for the normal retention window, so the failure can be reproduced and diagnosed.
+            if j["state"] == "done":
+                try:
+                    os.remove(os.path.join(self.store.job_dir(jid), "input.zip"))
+                except OSError:
+                    pass
+            else:
+                j["inputKept"] = os.path.isfile(os.path.join(self.store.job_dir(jid), "input.zip"))
             self.store.save_job(j)
         log.info("job %s: %s in %.0fs (polygons=%s)", jid, j["state"], secs, j.get("polygons"))
 

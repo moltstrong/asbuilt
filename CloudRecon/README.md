@@ -7,8 +7,13 @@ and keep using the same key. Builds run on a **CPU-only** Modal container with a
 
 ```
 photos.zip ─▶ HEIC/JPEG decode, upright, ≤ 2000 px          (pillow-heif; LiDAR depth stays in the HEICs)
-           ─▶ pycolmap 4.2.1 SfM (SIFT, exhaustive matching, global mapper; one camera per image size)
+             + feature copies ≤ 3200 px, contrast-normalized (CLAHE) for SIFT only
+           ─▶ pycolmap 4.2.1 SfM: fast pass (8k SIFT, exhaustive, global mapper; incremental when weak), robust
+              pass when still weak (16k affine+DSP SIFT, global + incremental + relaxed incremental); best model,
+              rescaled to the 2000 px photos; one camera per image size
            ─▶ OpenMVS v2.4.0 DensifyPointCloud (full res) → ReconstructMesh (free-space + close holes)
+              (dense cloud empty/very sparse → LiDAR fallback: the photos' LiDAR depth fused in a TSDF with the SfM
+               cameras + phone poses; SfM can't line up the photos at all → the phone's own ARKit poses + LiDAR)
            ─▶ automatic crop (training cameras only) → RefineMesh
            ─▶ CloudRecon bake: QEM 250k → drop unseen faces → xatlas → two-band 8K photo texture
            ─▶ metric scale from the iPhone's LiDAR depth, Y-up (gravity from the camera x axes), object at the origin
@@ -60,11 +65,56 @@ a 100-photo capture is about 45-60 min. An 800 px smoke of the same set takes ab
 | `asbuilt_cloud/pipeline.py` | The build (`build_openmvs` default, `build_splat` optional) writing the Mac CLI's `status.json`/`result.json`/`recon-log.txt` contract; `camera_up` / `output_frame`. |
 | `asbuilt_cloud/openmvs_mesh.py` | OpenMVS stages with streamed, forward-only progress; crop; face visibility; two-band bake. |
 | `asbuilt_cloud/lidar_scale.py` | Metric scale from the depth image inside iPhone Object Capture HEICs (below). |
-| `asbuilt_cloud/sfm_pycolmap.py` | SfM (SIFT, exhaustive matching, global mapper with incremental fallback, undistort). |
+| `asbuilt_cloud/sfm_pycolmap.py` | SfM: fast + robust passes, global/incremental mappers, rescale to the MVS photos, undistort. |
+| `asbuilt_cloud/objectcapture.py` | Reads an iPhone Object Capture HEIC: LiDAR depth + confidence, intrinsics, ARKit camera pose (`cmex`). |
+| `asbuilt_cloud/lidar_fusion.py` | LiDAR fallback dense stage (TSDF), phone-pose ↔ SfM alignment, phone-pose cameras. |
 | `asbuilt_cloud/meshing.py`, `export.py`, `colmap_io.py` | Cleanup/decimation, xatlas unwrap, numba rasterizer + photo bake; USDZ via `usd-core`, OBJ, thumbnail; COLMAP readers. |
 | `asbuilt_cloud/runner.py`, `gpu_entry.py` | One-build entry point (`--stages fake` = CPU stand-ins for tests) and the Modal function body (any build container). |
 | `asbuilt_cloud/gsplat_train.py`, `splatmesh.py`, `splatrender*.py`, `Dockerfile` | Optional GPU splat path (CUDA image). |
-| `tests/test_cloudrecon.py` | 18 tests; no GPU, no OpenMVS, no account needed. |
+| `tests/test_cloudrecon.py`, `tests/test_robust.py` | 27 tests + 1 opt-in hard-set test; no GPU, no OpenMVS, no account needed. |
+
+## Hard scans: plain, shiny, dark objects, few photos (2026-10-27)
+
+The real iPhone scan "Object 1" (23 Object Capture photos of a plain object) failed in 26 s: the old SfM (2000 px
+photos, default SIFT, global mapper) lined up 13/23 photos with 54 sparse points, OpenMVS fused 0 depth maps and
+the mesh came out empty. What changed:
+
+- **SfM** (`sfm_pycolmap.py`): SIFT runs on separate feature copies, ≤ 3200 px (first octave 0: at octave -1 a 3200
+  px photo's scale space is 6400 px, ~1.3 GB per extraction thread) and contrast-normalized (percentile stretch +
+  CLAHE), so dim or evenly colored surfaces still give corners; the photos OpenMVS and the bake use keep their
+  colors. A fast pass runs on every scan (8k features, exhaustive matching, global mapper; the incremental mapper
+  too when the global model registers < 85 % of the photos or < 100 points per photo). Only when that is still weak
+  (and ≤ 80 photos) a robust pass adds 16k affine-shape + domain-size-pooled features and the incremental mapper with
+  relaxed thresholds. The model with the most photos/points wins and is rescaled to the 2000 px photos. Guided
+  matching is off: on CPU (COLMAP 4.2) it didn't finish 15 pairs of 16k features in 6 minutes.
+- **Hard test set** (`tests/test_robust.py`, opt-in `ASBUILT_HARD_SET=<dataset_monstree/full>`): 23 of the 41
+  monstree photos, darkened to ~8 % with low contrast and noise. Old settings: **no reconstruction (0/23)**. Now:
+  **23/23 photos, 10.6k points in ~22 s** (M4). The normal stump set still lines up 23/23 (13k points, 0.68 px at
+  2000 px) in about the same time as before.
+- **LiDAR fallback** (`lidar_fusion.py`): when OpenMVS's dense cloud has < max(20k, 2k × photos) points or the
+  cropped mesh is empty, the LiDAR depth in the HEICs (medium/high confidence only) is fused in the numba TSDF with
+  the SfM cameras, scaled by the LiDAR scale (or the phone-pose scale), plus phone-pose cameras for photos SfM
+  couldn't register. When SfM lines up < 50 % of the photos and ≥ 60 % carry pose + depth + intrinsics, the build
+  uses the phone's ARKit poses directly (meters). `result.json` `densePath` says which ran (`openmvs`, `lidar`,
+  `phone-poses+lidar`); the recon-log has the numbers.
+- **Plain failure text** when it still can't build, e.g. "Only 13 of 23 photos could be matched. Plain, shiny or
+  dark objects need more photos with overlap - 60+ all around, in even light."
+- **Failed jobs keep `input.zip`** (and `out/recon-log.txt`) for the normal 7-day retention, so a failure can be
+  reproduced (`modal volume get asbuilt-data jobs/<id>/input.zip`); successful jobs still drop it.
+
+### What an Object Capture HEIC carries (`objectcapture.py`, checked on a real iPhone 13 Pro / iOS 18.4+ file)
+
+- LiDAR depth 256×192 (portrait, rotated with the photo), 8-bit uniform Z between `z-near`/`z-far`, plus an
+  `ObjectCapture#DepthConfidenceMap` aux image (0/1/2).
+- Intrinsics (`cmin`) in pixels of the displayed photo (fx ≈ fy ≈ 3022, cx ≈ 1518, cy ≈ 2006 for 3024×4032).
+- The **camera pose** (`cmex`, a uuid box `4363e914-…`): position in µm + rotation quaternion in the ARKit world
+  (meters, +Y against gravity). The rotation maps OpenCV camera axes (x right, y down, z forward) to the world on
+  iOS ≥ 18.4; older iOS wrote ARKit camera axes. pillow-heif only exposes the rotation, so the box is parsed
+  directly. The pipeline never trusts the convention blindly: it aligns phone poses to SfM (similarity on camera
+  centers, then rotation residual for both conventions) and uses them only within 5° / 5 %.
+- uri metadata items: `CameraCalibrationData` (NSKeyedArchiver plist with IntrinsicMatrix for 4032×3024 and lens
+  distortion), `ObjectBoundingBox` (3×4 float32), `ObjectTransform`, `RawFeaturePoints`, `PointCloudData`, … The
+  Exif MakerNote has no gravity vector.
 
 ## Metric scale (LiDAR) and orientation
 
@@ -87,7 +137,8 @@ On the stump the result matches Apple's frame (ground within 2.4° of level).
 ```bash
 uv venv -p 3.12 /tmp/cr && VIRTUAL_ENV=/tmp/cr uv pip install "numpy<2.4" scipy numba scikit-image "open3d==0.20.0" \
     xatlas usd-core plyfile pillow pillow-heif pycolmap==4.2.1 pytest modal
-cd CloudRecon && /tmp/cr/bin/python -m pytest tests -q        # 18 passed in ~23 s on the M4
+cd CloudRecon && /tmp/cr/bin/python -m pytest tests -q        # 27 passed, 1 skipped in ~26 s on the M4
+ASBUILT_HARD_SET=<dataset_monstree/full> /tmp/cr/bin/python -m pytest tests/test_robust.py -k hard_set -s  # ~45 s
 ```
 They cover: TSDF sphere; clean → unwrap → bake → USDZ (validators, 64-byte aligned STORE zip) → OBJ; the default
 OpenMVS pipeline with fake SfM/OpenMVS stages through the real crop, bake, scale and orientation code (object at the
@@ -110,7 +161,8 @@ The URL is `https://<workspace>--asbuilt-recon-api.<region>.modal.run` and stays
 find it through the discovery gist (`asbuilt-recon.json`: `baseURL`, `apiVersion`, `transport`, `updatedAt`);
 TestFlight builds also bake it in from the `RECON_BASE_URL` secret. Deploy-time env: `ASBUILT_BUILD_CPUS` (16),
 `ASBUILT_BUILD_MEMORY_MB` (32768), `ASBUILT_MAX_CONCURRENT_BUILDS` (3 builds at once), `ASBUILT_ENABLE_SPLAT` (off), `ASBUILT_GPU`, `MODAL_APP_NAME`. In the build
-container: `CLOUD_MAX_SIDE` (2000), `OMVS_THREADS` (all cores), `CLOUD_KEEP_WORK=1` (keep intermediates).
+container: `CLOUD_MAX_SIDE` (2000), `CLOUD_SFM_MAX_SIDE` (3200, feature copies), `SFM_ROBUST_MAX_PHOTOS` (80),
+`OMVS_THREADS` (all cores), `CLOUD_KEEP_WORK=1` (keep intermediates).
 
 Image notes (Ubuntu 24.04): OpenMVS 2.4.0 needs nanoflann (pinned 1.7.1), libjxl through pkg-config, CGAL ≥ 6.0
 (`CGAL/AABB_traits_3.h`; Ubuntu ships 5.6, so the 6.0.1 header release is installed) and

@@ -441,6 +441,7 @@ def test_http_v1_flow(server, tmp_path):
     stored = app.store.load_job(jid)  # internal fields the v1 job view doesn't expose (same as the Mac)
     assert stored["usdcheckerPassed"] is True and stored["engine"] == "asbuilt-cloud"
     assert "splatInfo" not in stored and "gpuCallID" not in stored
+    assert not os.path.exists(os.path.join(app.store.job_dir(jid), "input.zip"))  # done: photos no longer needed
     names = {f["name"]: f for f in job["files"]}
     assert {"model.usdz", "recon-log.txt", "thumbnail.png", "model.glb"} <= set(names)
     assert "splat.ply" not in names  # OpenMVS (default) builds have no splat
@@ -489,6 +490,11 @@ def test_http_failed_build_reports_plain_error(server, tmp_path):
         time.sleep(0.3)
     assert job["state"] == "failed"
     assert job["error"]["code"] == "build_failed" and "photos" in job["error"]["message"]
+    # a failed build keeps its upload + log for the retention window, so the failure can be reproduced
+    jdir = server[1].store.job_dir(u["jobID"])
+    assert os.path.isfile(os.path.join(jdir, "input.zip")) and server[1].store.load_job(u["jobID"])["inputKept"]
+    assert os.path.isfile(os.path.join(jdir, "out", "recon-log.txt"))
+    assert any(f["name"] == "recon-log.txt" for f in job["files"])
 
 
 # ---------------------------------------------------------------------------------------------

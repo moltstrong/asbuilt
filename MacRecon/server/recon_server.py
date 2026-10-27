@@ -723,11 +723,15 @@ class Worker(threading.Thread):
                 msg = result.get("errorMessage") or "The build failed. The log has the details."
                 j["message"] = msg
                 j["error"] = {"code": "build_failed", "message": msg, "exitCode": rc, "technical": (result.get("errorTechnical") or "")[:2000]}
-            # Input zip is no longer needed once the job finished.
-            try:
-                os.remove(os.path.join(jdir, "input.zip"))
-            except OSError:
-                pass
+            # Input zip is no longer needed once the job succeeded; a failed job keeps it for the retention window
+            # so the failure can be reproduced.
+            if j["state"] == "done":
+                try:
+                    os.remove(os.path.join(jdir, "input.zip"))
+                except OSError:
+                    pass
+            else:
+                j["inputKept"] = os.path.isfile(os.path.join(jdir, "input.zip"))
             self.store.save_job(j)
         log.info("job %s: %s in %.0fs (rc=%s, polygons=%s)", jid, j["state"], secs, rc, j.get("polygons"))
         if j.get("notify", True):

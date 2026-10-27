@@ -26,6 +26,35 @@ def omvs_bin(name):
     return os.path.join(os.environ.get("OMVS_BIN", "/opt/openmvs/bin/OpenMVS"), name)
 
 
+# A dense cloud below this is "empty or very sparse" (a good 41-photo object gives millions of points; the failed
+# real scan "Object 1" gave 0): the build switches to the LiDAR fallback when the photos carry depth.
+MIN_DENSE_POINTS = 20000
+MIN_DENSE_POINTS_PER_PHOTO = 2000
+
+
+class SparseDense(Exception):
+    """OpenMVS densify produced (almost) nothing."""
+
+    def __init__(self, points, photos, stage="densify"):
+        super().__init__("dense cloud has %d points from %d photos (%s)" % (points, photos, stage))
+        self.points, self.photos, self.stage = points, photos, stage
+
+
+def ply_vertex_count(path):
+    """Vertex count from a PLY header (0 if the file is missing)."""
+    try:
+        with open(path, "rb") as f:
+            for _ in range(64):
+                line = f.readline()
+                if not line or line.startswith(b"end_header"):
+                    break
+                if line.startswith(b"element vertex"):
+                    return int(line.split()[2])
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
 def available_cpus():
     """CPU cores this container may use (cgroup v2 quota, else affinity, else os.cpu_count())."""
     try:
@@ -254,7 +283,8 @@ def texture_mesh(V, F, cams, image_dir, log, tris=250000, tex=8192, min_views=1,
         if len(F):
             V, F = _compact(V, F)
     if len(F) < 100:
-        raise PipelineError("The mesh came out empty. Try more photos all around the object, with good light.")
+        from .pipeline import HARD_OBJECT_TIP
+        raise PipelineError("The mesh came out empty: no photo sees enough of it. " + HARD_OBJECT_TIP)
     V2, F2, UV, _ = meshing.unwrap(V, F, tex, log=log)
     if progress:
         progress(0.3)
@@ -286,8 +316,9 @@ def texture_mesh(V, F, cams, image_dir, log, tris=250000, tex=8192, min_views=1,
 
 
 def openmvs_mesh(undist, work, log, progress=None, threads=None):
-    """Raw OpenMVS mesh (COLMAP world frame) of the object: (V, F, info). `progress(stage, fraction, message)`."""
-    from .pipeline import PipelineError
+    """Raw OpenMVS mesh (COLMAP world frame) of the object: (V, F, info). `progress(stage, fraction, message)`.
+    Raises SparseDense when the dense cloud is (almost) empty or the cropped mesh is, so the caller can fall back
+    to the LiDAR depth."""
     T = str(threads if threads is not None else int(os.environ.get("OMVS_THREADS", "0")) or available_cpus())
     mvs = os.path.join(work, "mvs")
     os.makedirs(mvs, exist_ok=True)
@@ -306,6 +337,11 @@ def openmvs_mesh(undist, work, log, progress=None, threads=None):
                                  "--crop-to-roi", "0"], log, mvs,
                                 prog("pointCloudGeneration", 0.0, 1.0, "Measuring depth in every photo"),
                                 expected_seconds=13.5 * n, main=r"depth-?maps?")
+    dense_pts = ply_vertex_count(os.path.join(mvs, "dense.ply"))
+    min_pts = max(MIN_DENSE_POINTS, MIN_DENSE_POINTS_PER_PHOTO * n)
+    log("dense: OpenMVS fused %d points from %d photos (needs >= %d)" % (dense_pts, n, min_pts))
+    if dense_pts < min_pts:
+        raise SparseDense(dense_pts, n)
     if progress:
         progress("meshGeneration", 0.0, "Building the mesh")
     times["mesh"] = run_tool([omvs_bin("ReconstructMesh"), "-i", "dense.mvs", "-p", "dense.ply", "-o", "mesh.mvs",
@@ -318,7 +354,7 @@ def openmvs_mesh(undist, work, log, progress=None, threads=None):
     V, F, cinfo = crop(V, F, cams, min_frac=0.1, radius_factor=1.6)
     log("crop: %s" % cinfo)
     if len(F) < 100:
-        raise PipelineError("The mesh came out empty. Try more photos all around the object, with good light.")
+        raise SparseDense(dense_pts, n, stage="crop")
     write_ply_mesh(os.path.join(mvs, "crop.ply"), V, F)
     times["crop"] = time.time() - t0
     if progress:
