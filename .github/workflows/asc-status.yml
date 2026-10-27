@@ -1,0 +1,25 @@
+name: TestFlight status
+
+# Manual only: shows which builds App Store Connect has, their processing /
+# beta state, and which TestFlight groups can install them. Linux runner (free).
+on:
+  workflow_dispatch:
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      BUNDLE_ID: ${{ vars.BUNDLE_ID != '' && vars.BUNDLE_ID || 'com.moltstrong.asbuilt' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Query App Store Connect
+        run: |
+          pip install --quiet 'pyjwt[crypto]'
+          KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          export KEY_PATH
+          python3 scripts/install-asc-key.py
+          python3 scripts/asc-status.py
